@@ -43,6 +43,7 @@ from .audit import (
     snapshot_path,
     write_audit_record,
 )
+from .rate_limit import check_tool_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,29 @@ def _run_audited(operation: str, func, **context) -> str:
     audit-write failure is swallowed inside write_audit_record so the trail can never break
     the tool result.
     """
+    rate_limit = check_tool_rate_limit(operation)
+    if rate_limit is not None:
+        result = json.dumps({
+            "error": "Rate limit exceeded",
+            "retry_after_seconds": rate_limit,
+        })
+        if should_audit_operation(operation):
+            target_path = infer_target_path(operation, context)
+            before = (
+                snapshot_path(before_target_path(operation, context))
+                if operation in MUTATION_OPERATIONS
+                else None
+            )
+            write_audit_record(build_audit_record(
+                operation=operation,
+                target_path=target_path,
+                before=before,
+                after=before if operation in MUTATION_OPERATIONS else None,
+                operation_status="error",
+                error="Rate limit exceeded",
+            ))
+        return result
+
     if not should_audit_operation(operation):
         return func()
 
@@ -420,7 +444,7 @@ def vault_append(path: str, content: str, separator: str = "\n\n", create_dirs: 
 @mcp.tool(
     name="vault_batch_frontmatter_update",
     description="Update YAML frontmatter fields on multiple files without changing body content. Each update merges new fields into existing frontmatter.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
 )
 def vault_batch_frontmatter_update(updates: list[FrontmatterUpdateInput]) -> str:
     """Batch update frontmatter fields."""

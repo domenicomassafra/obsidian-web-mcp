@@ -63,3 +63,8 @@ def test_vault_write_advertises_conflict_guards():
 
 def test_public_tool_count_remains_stable():
     assert len(server.mcp._tool_manager._tools) == 20
+
+
+def test_batch_frontmatter_update_is_marked_destructive():
+    tool = server.mcp._tool_manager.get_tool("vault_batch_frontmatter_update")
+    assert tool.annotations.destructiveHint is True
