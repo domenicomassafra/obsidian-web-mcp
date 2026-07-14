@@ -39,6 +39,7 @@ def test_vault_write_merge_frontmatter(vault_dir):
         "test-note.md",
         "---\npriority: high\n---\n\nUpdated body.",
         merge_frontmatter=True,
+        overwrite=True,
     ))
     assert "error" not in result
 

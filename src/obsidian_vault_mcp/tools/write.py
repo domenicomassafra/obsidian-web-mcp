@@ -17,8 +17,15 @@ from ..write_events import fire_write
 logger = logging.getLogger(__name__)
 
 
-def vault_write(path: str, content: str, create_dirs: bool = True, merge_frontmatter: bool = False) -> str:
-    """Write a file to the vault, optionally merging frontmatter with existing content."""
+def vault_write(
+    path: str,
+    content: str,
+    create_dirs: bool = True,
+    merge_frontmatter: bool = False,
+    overwrite: bool = False,
+    expected_sha256: str | None = None,
+) -> str:
+    """Create a file or explicitly replace a known version of an existing file."""
     try:
         resolve_vault_path(path)
 
@@ -47,11 +54,17 @@ def vault_write(path: str, content: str, create_dirs: bool = True, merge_frontma
                     "created": False,
                 })
 
-        is_new, size = write_file_atomic(path, content, create_dirs=create_dirs)
+        is_new, size = write_file_atomic(
+            path,
+            content,
+            create_dirs=create_dirs,
+            overwrite=overwrite,
+            expected_sha256=expected_sha256,
+        )
 
         fire_write("created" if is_new else "updated", [path])
         return dumps({"path": path, "created": is_new, "size": size})
-    except ValueError as e:
+    except (ValueError, FileNotFoundError, FileExistsError) as e:
         return dumps({"error": str(e), "path": path})
     except Exception as e:
         logger.error(f"vault_write error for {path}: {e}")

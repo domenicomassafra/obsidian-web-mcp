@@ -75,7 +75,7 @@ def test_raw_token_never_written_only_hash(audit_log):
 
 def test_overwrite_captures_before_and_after(audit_log):
     server.vault_write("note.md", "first version")
-    server.vault_write("note.md", "second, longer version")
+    server.vault_write("note.md", "second, longer version", overwrite=True)
     rec = _records(audit_log)[-1]
     assert rec["size_before"] == len(b"first version")
     assert rec["size_after"] == len(b"second, longer version")

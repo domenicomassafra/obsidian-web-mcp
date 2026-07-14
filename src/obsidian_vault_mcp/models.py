@@ -1,6 +1,6 @@
 """Pydantic input models for obsidian-vault-mcp tool endpoints."""
 
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -13,6 +13,20 @@ from .config import (
     MAX_LIST_DEPTH,
     MAX_SEARCH_RESULTS,
 )
+
+
+FrontmatterMatchType = Literal["exact", "contains", "exists"]
+AnalyticsFindingCategory = Literal[
+    "frontmatter_missing",
+    "required_frontmatter_missing",
+    "broken_wikilinks",
+    "suspicious_tag_variants",
+    "encoding_issues",
+    "oversized_files",
+]
+CanvasNodeType = Literal["text", "file", "link", "group"]
+CanvasSide = Literal["top", "right", "bottom", "left"]
+ExpectedSha256 = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
 
 
 class VaultReadInput(BaseModel):
@@ -29,7 +43,7 @@ class VaultReadInput(BaseModel):
 
 
 class VaultWriteInput(BaseModel):
-    """Write or overwrite a file in the vault."""
+    """Create a file or explicitly replace a known vault version."""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -51,6 +65,17 @@ class VaultWriteInput(BaseModel):
     merge_frontmatter: bool = Field(
         default=False,
         description="If true, merge YAML frontmatter with existing file's frontmatter instead of replacing",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="Explicitly allow replacing an existing file without version checking",
+    )
+    expected_sha256: ExpectedSha256 | None = Field(
+        default=None,
+        description=(
+            "Replace only when the existing file has this SHA-256 digest; "
+            "safer than a blind overwrite"
+        ),
     )
 
 
@@ -293,7 +318,7 @@ class VaultSearchFrontmatterInput(BaseModel):
         description="Value to match against; ignored when match_type is 'exists'",
         max_length=200,
     )
-    match_type: Literal["exact", "contains", "exists"] = Field(
+    match_type: FrontmatterMatchType = Field(
         default="exact",
         description="How to match: 'exact' for equality, 'contains' for substring, 'exists' to check field presence",
     )
@@ -327,27 +352,35 @@ class VaultBatchReadInput(BaseModel):
     )
 
 
+class FrontmatterUpdateInput(BaseModel):
+    """A frontmatter merge for one vault file."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    path: str = Field(
+        ...,
+        description="Relative path from vault root",
+        min_length=1,
+        max_length=500,
+    )
+    fields: dict[str, Any] = Field(
+        ...,
+        description="Frontmatter key-value pairs to merge; values may be YAML scalars, lists, or objects",
+        min_length=1,
+    )
+
+
 class VaultBatchFrontmatterUpdateInput(BaseModel):
     """Update YAML frontmatter on multiple files in one request."""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    updates: list[dict] = Field(
+    updates: list[FrontmatterUpdateInput] = Field(
         ...,
-        description="List of updates, each a dict with 'path' (str) and 'fields' (dict of key-value pairs to set)",
+        description="Per-file frontmatter merges; each item requires path and non-empty fields",
         min_length=1,
         max_length=MAX_BATCH_SIZE,
     )
-
-    @field_validator("updates")
-    @classmethod
-    def validate_updates(cls, v: list[dict]) -> list[dict]:
-        for i, item in enumerate(v):
-            if "path" not in item or not isinstance(item["path"], str):
-                raise ValueError(f"updates[{i}] must contain a 'path' key with a string value")
-            if "fields" not in item or not isinstance(item["fields"], dict):
-                raise ValueError(f"updates[{i}] must contain a 'fields' key with a dict value")
-        return v
 
 
 def _validate_alnum_id(value: str | None) -> str | None:
@@ -366,11 +399,17 @@ class CanvasNodeInput(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str | None = Field(default=None, description="Optional alphanumeric node id; generated when omitted")
-    type: str = Field(..., min_length=1, description="Canvas node type, e.g. text, file, link, or group")
+    type: CanvasNodeType = Field(..., description="Canvas node type: text, file, link, or group")
     x: int | float = Field(..., description="Canvas x coordinate")
     y: int | float = Field(..., description="Canvas y coordinate")
     width: int | float = Field(..., gt=0, description="Node width")
     height: int | float = Field(..., gt=0, description="Node height")
+    text: str | None = Field(default=None, description="Text content for a text node")
+    file: str | None = Field(default=None, description="Vault-relative file path for a file node")
+    url: str | None = Field(default=None, description="URL for a link node")
+    label: str | None = Field(default=None, description="Label for a group node")
+    color: str | int | None = Field(default=None, description="Optional Obsidian Canvas color")
+    subpath: str | None = Field(default=None, description="Optional heading or block subpath for a file node")
 
     @field_validator("id")
     @classmethod
@@ -385,9 +424,11 @@ class CanvasEdgeInput(BaseModel):
 
     id: str | None = Field(default=None, description="Optional alphanumeric edge id; generated when omitted")
     fromNode: str = Field(..., min_length=1, description="Existing source node id")
-    fromSide: Literal["top", "right", "bottom", "left"] = Field(..., description="One of: top, right, bottom, left")
+    fromSide: CanvasSide = Field(..., description="One of: top, right, bottom, left")
     toNode: str = Field(..., min_length=1, description="Existing target node id")
-    toSide: Literal["top", "right", "bottom", "left"] = Field(..., description="One of: top, right, bottom, left")
+    toSide: CanvasSide = Field(..., description="One of: top, right, bottom, left")
+    color: str | int | None = Field(default=None, description="Optional Obsidian Canvas color")
+    label: str | None = Field(default=None, description="Optional edge label")
 
     @field_validator("id")
     @classmethod
@@ -476,14 +517,7 @@ class VaultAnalyticsFindingsInput(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    category: Literal[
-        "frontmatter_missing",
-        "required_frontmatter_missing",
-        "broken_wikilinks",
-        "suspicious_tag_variants",
-        "encoding_issues",
-        "oversized_files",
-    ] = Field(
+    category: AnalyticsFindingCategory = Field(
         ...,
         description="Analytics finding category to return",
     )

@@ -38,7 +38,7 @@ def test_vault_write_new_file_fires_created(vault_dir, events):
 
 
 def test_vault_write_existing_file_fires_updated(vault_dir, events):
-    vault_write("test-note.md", "changed body")
+    vault_write("test-note.md", "changed body", overwrite=True)
     assert events == [("updated", ["test-note.md"])]
 
 

@@ -164,21 +164,28 @@ from .tools.analytics import (
 from .models import (
     VaultReadInput,
     VaultWriteInput,
+    ExpectedSha256,
     VaultWriteBinaryInput,
+    VaultEditOperationInput,
     VaultEditInput,
     VaultAppendInput,
     VaultBatchReadInput,
+    FrontmatterUpdateInput,
     VaultBatchFrontmatterUpdateInput,
     VaultSearchInput,
     VaultSearchFrontmatterInput,
+    FrontmatterMatchType,
     VaultListInput,
     VaultMoveInput,
     VaultDeleteInput,
     VaultCanvasReadInput,
+    CanvasNodeInput,
+    CanvasEdgeInput,
     VaultCanvasAddNodeInput,
     VaultCanvasAddEdgeInput,
     VaultDailyNoteAppendInput,
     VaultAnalyticsSummaryInput,
+    AnalyticsFindingCategory,
     VaultAnalyticsFindingsInput,
 )
 
@@ -312,15 +319,40 @@ def vault_batch_read(paths: list[str], include_content: bool = True) -> str:
 
 @mcp.tool(
     name="vault_write",
-    description="Write a file to the Obsidian vault. Supports frontmatter merging with existing files. Creates parent directories by default.",
+    description=(
+        "Create a file in the Obsidian vault without clobbering an existing note by default. "
+        "Use overwrite=true for an explicit blind replacement, or expected_sha256 for a "
+        "version-checked replacement. Supports frontmatter merging."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def vault_write(path: str, content: str, create_dirs: bool = True, merge_frontmatter: bool = False) -> str:
+def vault_write(
+    path: str,
+    content: str,
+    create_dirs: bool = True,
+    merge_frontmatter: bool = False,
+    overwrite: bool = False,
+    expected_sha256: ExpectedSha256 | None = None,
+) -> str:
     """Write a file to the vault."""
-    inp = VaultWriteInput(path=path, content=content, create_dirs=create_dirs, merge_frontmatter=merge_frontmatter)
+    inp = VaultWriteInput(
+        path=path,
+        content=content,
+        create_dirs=create_dirs,
+        merge_frontmatter=merge_frontmatter,
+        overwrite=overwrite,
+        expected_sha256=expected_sha256,
+    )
     return _run_audited(
         "vault_write",
-        lambda: _vault_write(inp.path, inp.content, inp.create_dirs, inp.merge_frontmatter),
+        lambda: _vault_write(
+            inp.path,
+            inp.content,
+            inp.create_dirs,
+            inp.merge_frontmatter,
+            inp.overwrite,
+            inp.expected_sha256,
+        ),
         path=inp.path,
     )
 
@@ -344,7 +376,7 @@ def vault_write_binary(path: str, data: str, media_type: str, overwrite: bool = 
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def vault_edit(path: str, edits: list[dict], dry_run: bool = False) -> str:
+def vault_edit(path: str, edits: list[VaultEditOperationInput], dry_run: bool = False) -> str:
     """Patch a file with exact text replacements."""
     inp = VaultEditInput(path=path, edits=edits, dry_run=dry_run)
     if inp.dry_run:
@@ -380,13 +412,14 @@ def vault_append(path: str, content: str, separator: str = "\n\n", create_dirs: 
     description="Update YAML frontmatter fields on multiple files without changing body content. Each update merges new fields into existing frontmatter.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
-def vault_batch_frontmatter_update(updates: list[dict]) -> str:
+def vault_batch_frontmatter_update(updates: list[FrontmatterUpdateInput]) -> str:
     """Batch update frontmatter fields."""
     inp = VaultBatchFrontmatterUpdateInput(updates=updates)
+    update_data = [update.model_dump() for update in inp.updates]
     return _run_audited(
         "vault_batch_frontmatter_update",
-        lambda: _vault_batch_frontmatter_update(inp.updates),
-        paths=[u.get("path") for u in inp.updates if isinstance(u, dict) and u.get("path")],
+        lambda: _vault_batch_frontmatter_update(update_data),
+        paths=[update.path for update in inp.updates],
     )
 
 
@@ -418,7 +451,7 @@ def vault_search(
 def vault_search_frontmatter(
     field: str,
     value: str = "",
-    match_type: str = "exact",
+    match_type: FrontmatterMatchType = "exact",
     path_prefix: str | None = None,
     max_results: int = 20,
 ) -> str:
@@ -501,7 +534,7 @@ def vault_canvas_read(path: str) -> str:
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def vault_canvas_add_node(path: str, node: dict) -> str:
+def vault_canvas_add_node(path: str, node: CanvasNodeInput) -> str:
     """Append a node to a Canvas file."""
     inp = VaultCanvasAddNodeInput(path=path, node=node)
     return _run_audited(
@@ -520,7 +553,7 @@ def vault_canvas_add_node(path: str, node: dict) -> str:
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def vault_canvas_add_edge(path: str, edge: dict) -> str:
+def vault_canvas_add_edge(path: str, edge: CanvasEdgeInput) -> str:
     """Append an edge to a Canvas file."""
     inp = VaultCanvasAddEdgeInput(path=path, edge=edge)
     return _run_audited(
@@ -597,7 +630,7 @@ def vault_analytics_summary(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
 def vault_analytics_findings(
-    category: str,
+    category: AnalyticsFindingCategory,
     path_prefix: str | None = None,
     required_frontmatter: list[str] | None = None,
     max_results: int = 50,

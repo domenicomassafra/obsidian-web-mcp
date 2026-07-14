@@ -1,6 +1,7 @@
 """Core filesystem operations for the Obsidian vault."""
 
 import fnmatch
+import hashlib
 import os
 import shutil
 import tempfile
@@ -56,6 +57,7 @@ def read_file(relative_path: str) -> tuple[str, dict]:
 
     metadata = {
         "size": stat.st_size,
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "modified": _iso_timestamp(stat.st_mtime),
         "created": _iso_timestamp(stat.st_birthtime if hasattr(stat, "st_birthtime") else stat.st_ctime),
     }
@@ -64,12 +66,20 @@ def read_file(relative_path: str) -> tuple[str, dict]:
 
 
 def write_file_atomic(
-    relative_path: str, content: str, create_dirs: bool = True
+    relative_path: str,
+    content: str,
+    create_dirs: bool = True,
+    overwrite: bool = True,
+    expected_sha256: str | None = None,
 ) -> tuple[bool, int]:
     """Write content to a file atomically.
 
     Returns (is_new_file, bytes_written). Writes to a tempfile in the same
-    directory then replaces the target, so readers never see a partial write.
+    directory then puts it in place, so readers never see a partial write.
+
+    ``overwrite=False`` is a true atomic no-clobber create. ``expected_sha256``
+    performs an optimistic version check immediately before atomic replacement;
+    it rejects absent or changed targets instead of blindly overwriting them.
     """
     encoded = content.encode("utf-8")
     if len(encoded) > config.MAX_CONTENT_SIZE:
@@ -80,6 +90,17 @@ def write_file_atomic(
     path = resolve_vault_path(relative_path)
     is_new = not path.exists()
 
+    if expected_sha256 is not None:
+        if is_new:
+            raise FileNotFoundError(
+                f"Expected an existing file for SHA-256 check: {relative_path}"
+            )
+        current_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if current_digest != expected_sha256.lower():
+            raise ValueError(
+                f"SHA-256 mismatch for {relative_path}: file changed since it was read"
+            )
+
     if create_dirs:
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -88,7 +109,29 @@ def write_file_atomic(
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(encoded)
-        os.replace(tmp_path, path)
+        if expected_sha256 is not None:
+            current_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if current_digest != expected_sha256.lower():
+                raise ValueError(
+                    f"SHA-256 mismatch for {relative_path}: file changed before write"
+                )
+            os.replace(tmp_path, path)
+        elif overwrite:
+            os.replace(tmp_path, path)
+        else:
+            try:
+                os.link(tmp_path, path)
+            except FileExistsError:
+                raise FileExistsError(
+                    f"File already exists: {relative_path}. "
+                    "Set overwrite=true or provide expected_sha256 to replace it."
+                )
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            is_new = True
     except BaseException:
         # Clean up the temp file on any failure
         try:
