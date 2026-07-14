@@ -345,8 +345,8 @@ def vault_batch_read(paths: list[str], include_content: bool = True) -> str:
     name="vault_write",
     description=(
         "Create a file in the Obsidian vault without clobbering an existing note by default. "
-        "Use overwrite=true for an explicit blind replacement, or expected_sha256 for a "
-        "version-checked replacement. Supports frontmatter merging."
+        "Every replacement requires expected_sha256; overwrite=true never bypasses the "
+        "version check. Supports frontmatter merging."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )

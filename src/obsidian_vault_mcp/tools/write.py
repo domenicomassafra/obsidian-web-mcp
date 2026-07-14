@@ -3,6 +3,7 @@
 import base64
 import binascii
 import difflib
+import hashlib
 import logging
 from pathlib import Path
 
@@ -28,6 +29,13 @@ def vault_write(
     """Create a file or explicitly replace a known version of an existing file."""
     try:
         resolve_vault_path(path)
+        if overwrite and expected_sha256 is None:
+            return dumps({
+                "error": (
+                    "Blind overwrite is disabled; read the file and provide expected_sha256"
+                ),
+                "path": path,
+            })
 
         if merge_frontmatter:
             try:
@@ -63,7 +71,12 @@ def vault_write(
         )
 
         fire_write("created" if is_new else "updated", [path])
-        return dumps({"path": path, "created": is_new, "size": size})
+        return dumps({
+            "path": path,
+            "created": is_new,
+            "size": size,
+            "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        })
     except (ValueError, FileNotFoundError, FileExistsError) as e:
         return dumps({"error": str(e), "path": path})
     except Exception as e:

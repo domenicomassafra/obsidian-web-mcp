@@ -124,7 +124,7 @@ def write_file_atomic(
             except FileExistsError:
                 raise FileExistsError(
                     f"File already exists: {relative_path}. "
-                    "Set overwrite=true or provide expected_sha256 to replace it."
+                    "Provide expected_sha256 to replace it."
                 )
             finally:
                 try:

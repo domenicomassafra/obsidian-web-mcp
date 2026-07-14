@@ -1,5 +1,6 @@
 """Integration tests for tool functions."""
 
+import hashlib
 import json
 
 import pytest
@@ -40,6 +41,7 @@ def test_vault_write_merge_frontmatter(vault_dir):
         "---\npriority: high\n---\n\nUpdated body.",
         merge_frontmatter=True,
         overwrite=True,
+        expected_sha256=hashlib.sha256((vault_dir / "test-note.md").read_bytes()).hexdigest(),
     ))
     assert "error" not in result
 

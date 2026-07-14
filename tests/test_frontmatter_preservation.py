@@ -1,9 +1,14 @@
 """vault_write must not rewrite YAML frontmatter formatting on merge."""
 
+import hashlib
 import json
 
 from obsidian_vault_mcp import config
 from obsidian_vault_mcp.tools.write import vault_write
+
+
+def _sha(path: str) -> str:
+    return hashlib.sha256((config.VAULT_PATH / path).read_bytes()).hexdigest()
 
 
 def test_merge_frontmatter_preserves_quotes_and_block_lists(vault_dir):
@@ -21,7 +26,14 @@ def test_merge_frontmatter_preserves_quotes_and_block_lists(vault_dir):
 
     # New frontmatter is carried in the content itself (upstream merge contract).
     new_content = "---\nstatus: draft\n---\nbody\n"
-    vault_write(path, new_content, create_dirs=True, merge_frontmatter=True, overwrite=True)
+    vault_write(
+        path,
+        new_content,
+        create_dirs=True,
+        merge_frontmatter=True,
+        overwrite=True,
+        expected_sha256=_sha(path),
+    )
 
     result = (config.VAULT_PATH / path).read_text()
     assert "title: 'single quoted'" in result   # quote style kept
@@ -37,7 +49,8 @@ def test_merge_aborts_on_malformed_existing_frontmatter(vault_dir):
     (config.VAULT_PATH / path).write_text(original)
 
     result = json.loads(vault_write(path, "---\nstatus: draft\n---\nbody\n",
-                                    create_dirs=True, merge_frontmatter=True, overwrite=True))
+                                    create_dirs=True, merge_frontmatter=True, overwrite=True,
+                                    expected_sha256=_sha(path)))
 
     assert result["created"] is False
     assert "malformed" in result["error"].lower()
@@ -52,7 +65,8 @@ def test_merge_aborts_on_malformed_new_frontmatter(vault_dir):
     (config.VAULT_PATH / path).write_text(original)
 
     result = json.loads(vault_write(path, "---\nstatus: [unclosed\n---\nbody\n",
-                                    create_dirs=True, merge_frontmatter=True, overwrite=True))
+                                    create_dirs=True, merge_frontmatter=True, overwrite=True,
+                                    expected_sha256=_sha(path)))
 
     assert result["created"] is False
     assert (config.VAULT_PATH / path).read_text() == original
@@ -66,7 +80,8 @@ def test_merge_keeps_keys_when_value_contains_triple_dash(vault_dir):
     )
 
     vault_write(path, "---\npriority: 1\n---\nbody\n",
-                create_dirs=True, merge_frontmatter=True, overwrite=True)
+                create_dirs=True, merge_frontmatter=True, overwrite=True,
+                expected_sha256=_sha(path))
 
     result = (config.VAULT_PATH / path).read_text()
     assert "summary: alpha --- beta" in result  # inline --- preserved verbatim
@@ -80,7 +95,8 @@ def test_merge_keeps_bom_prefixed_existing_frontmatter(vault_dir):
     (config.VAULT_PATH / path).write_text("﻿---\ntitle: kept\n---\nbody\n")
 
     vault_write(path, "---\nstatus: draft\n---\nbody\n",
-                create_dirs=True, merge_frontmatter=True, overwrite=True)
+                create_dirs=True, merge_frontmatter=True, overwrite=True,
+                expected_sha256=_sha(path))
 
     result = (config.VAULT_PATH / path).read_text()
     assert "title: kept" in result    # existing frontmatter survived (not dropped)
@@ -95,7 +111,8 @@ def test_merge_overrides_existing_key_value(vault_dir):
     )
 
     vault_write(path, "---\nstatus: archived\n---\nbody\n",
-                create_dirs=True, merge_frontmatter=True, overwrite=True)
+                create_dirs=True, merge_frontmatter=True, overwrite=True,
+                expected_sha256=_sha(path))
 
     result = (config.VAULT_PATH / path).read_text()
     assert "status: 'archived'" in result   # value overridden, quote slot kept
@@ -111,7 +128,8 @@ def test_merge_bodyless_new_content_keeps_frontmatter(vault_dir):
     )
 
     vault_write(path, "brand new body only\n",
-                create_dirs=True, merge_frontmatter=True, overwrite=True)
+                create_dirs=True, merge_frontmatter=True, overwrite=True,
+                expected_sha256=_sha(path))
 
     result = (config.VAULT_PATH / path).read_text()
     assert "title: 'kept'" in result
@@ -126,7 +144,14 @@ def test_no_merge_writes_content_byte_identical(vault_dir):
     (config.VAULT_PATH / path).write_text("---\nold: 1\n---\nold body\n")
 
     content = "---\nstatus: yes\ntags: [a, b]\nq: 'x'\n---\nbody\n"
-    vault_write(path, content, create_dirs=True, merge_frontmatter=False, overwrite=True)
+    vault_write(
+        path,
+        content,
+        create_dirs=True,
+        merge_frontmatter=False,
+        overwrite=True,
+        expected_sha256=_sha(path),
+    )
 
     assert (config.VAULT_PATH / path).read_text() == content
 
@@ -139,7 +164,8 @@ def test_merge_preserves_existing_key_order_and_appends_new(vault_dir):
     )
 
     vault_write(path, "---\nbeta: 22\ndelta: 4\n---\nbody\n",
-                create_dirs=True, merge_frontmatter=True, overwrite=True)
+                create_dirs=True, merge_frontmatter=True, overwrite=True,
+                expected_sha256=_sha(path))
 
     result = (config.VAULT_PATH / path).read_text()
     positions = [result.index(f"{key}:") for key in ("alpha", "beta", "gamma", "delta")]

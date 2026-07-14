@@ -43,7 +43,7 @@ This is a server that provides network access to your personal notes. Security i
 
 **Path traversal is blocked at the filesystem layer.** Every file operation resolves paths against the vault root directory and rejects any attempt to escape it -- `..` traversal, symlink following, null byte injection, and dotfile access (`.obsidian`, `.git`, `.trash`) are all caught before they reach the filesystem. The server will never read or write outside your vault directory.
 
-**Writes are atomic and guarded.** Every file write goes to a temporary file first. `vault_write` creates without clobbering by default; replacing an existing note requires either explicit `overwrite=true` or the `sha256` returned by `vault_read` as `expected_sha256`. This prevents accidental replacement and rejects stale version-checked writes. Other mutation tools keep their narrower edit/append semantics.
+**Writes are atomic and guarded.** Every file write goes to a temporary file first. `vault_write` creates without clobbering by default; replacing an existing note requires the `sha256` returned by `vault_read` as `expected_sha256`. `overwrite=true` is retained for compatibility but cannot bypass the version check. This prevents accidental replacement and rejects stale writes. Other mutation tools keep their narrower edit/append semantics.
 
 **Safety limits prevent abuse.** Writes are capped at 1MB per file, batch operations at 20 files per request, and search results at 50 matches. Deletions are soft -- files move to `.trash/` rather than being permanently removed, matching Obsidian's own behavior. The delete tool also requires an explicit `confirm=true` parameter as a safety gate.
 
@@ -57,7 +57,7 @@ Found a vulnerability? Please report it privately rather than opening a public i
 |------|-------------|
 | `vault_read` | Read a file, returning content, metadata (including SHA-256 version digest), and parsed YAML frontmatter |
 | `vault_batch_read` | Read multiple files in one call; handles missing files gracefully |
-| `vault_write` | Create without clobbering by default; replace with explicit `overwrite` or version-check with `expected_sha256`; supports frontmatter merging |
+| `vault_write` | Create without clobbering by default; replace only with a matching `expected_sha256`; supports frontmatter merging |
 | `vault_write_binary` | Write an allowed binary file (image/PDF) to the vault from base64 content; enforces a media-type allowlist (declared type/extension, not byte-sniffed) and size cap, writes atomically |
 | `vault_edit` | Patch a file with ordered exact text replacements (token-efficient partial edits); supports dry-run diff previews |
 | `vault_append` | Append content to the end of a file without resending the existing body; creates the file when missing |

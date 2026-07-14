@@ -6,6 +6,7 @@ paths; vault_edit does not fire on a dry-run or a no-change edit; delete fires o
 a confirmed success; a failed/aborted write never fires.
 """
 
+import hashlib
 import json
 
 import pytest
@@ -38,7 +39,12 @@ def test_vault_write_new_file_fires_created(vault_dir, events):
 
 
 def test_vault_write_existing_file_fires_updated(vault_dir, events):
-    vault_write("test-note.md", "changed body", overwrite=True)
+    vault_write(
+        "test-note.md",
+        "changed body",
+        overwrite=True,
+        expected_sha256=hashlib.sha256((vault_dir / "test-note.md").read_bytes()).hexdigest(),
+    )
     assert events == [("updated", ["test-note.md"])]
 
 

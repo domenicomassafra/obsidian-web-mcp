@@ -68,7 +68,7 @@ class VaultWriteInput(BaseModel):
     )
     overwrite: bool = Field(
         default=False,
-        description="Explicitly allow replacing an existing file without version checking",
+        description="Replace an existing file only when expected_sha256 is also provided",
     )
     expected_sha256: ExpectedSha256 | None = Field(
         default=None,
@@ -77,6 +77,15 @@ class VaultWriteInput(BaseModel):
             "safer than a blind overwrite"
         ),
     )
+
+    @model_validator(mode="after")
+    def reject_blind_overwrite(self):
+        """Never let the compatibility flag bypass optimistic concurrency."""
+        if self.overwrite and self.expected_sha256 is None:
+            raise ValueError(
+                "Blind overwrite is disabled; provide expected_sha256"
+            )
+        return self
 
 
 class VaultWriteBinaryInput(BaseModel):
