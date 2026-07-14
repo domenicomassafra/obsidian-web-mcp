@@ -6,6 +6,7 @@ _run_audited wrapper is exercised end to end. The bearer middleware is not in th
 here, so the authenticated principal is bound manually via context.set_request_context.
 """
 
+import base64
 import json
 
 import pytest
@@ -80,6 +81,37 @@ def test_overwrite_captures_before_and_after(audit_log):
     assert rec["size_before"] == len(b"first version")
     assert rec["size_after"] == len(b"second, longer version")
     assert rec["checksum_before"] != rec["checksum_after"]
+
+
+def test_binary_write_success_and_overwrite_are_audited(audit_log):
+    first = base64.b64encode(b"first binary version").decode()
+    second = base64.b64encode(b"second binary version").decode()
+
+    server.vault_write_binary("asset.png", first, "image/png")
+    server.vault_write_binary("asset.png", second, "image/png", overwrite=True)
+
+    recs = [r for r in _records(audit_log) if r["operation"] == "vault_write_binary"]
+    assert len(recs) == 2
+    assert recs[0]["operation_status"] == "success"
+    assert recs[0]["size_before"] is None
+    assert recs[0]["size_after"] == len(b"first binary version")
+    assert recs[1]["size_before"] == len(b"first binary version")
+    assert recs[1]["size_after"] == len(b"second binary version")
+    assert recs[1]["checksum_before"] != recs[1]["checksum_after"]
+
+
+def test_binary_write_error_is_audited_without_creating_file(audit_log):
+    result = json.loads(
+        server.vault_write_binary("invalid.png", "not-base64!", "image/png")
+    )
+
+    assert "error" in result
+    rec = _records(audit_log)[-1]
+    assert rec["operation"] == "vault_write_binary"
+    assert rec["operation_status"] == "error"
+    assert rec["target_path"] == "invalid.png"
+    assert rec["size_before"] is None
+    assert rec["size_after"] is None
 
 
 def test_mutation_error_recorded(audit_log):
@@ -171,7 +203,7 @@ def test_snapshot_path_stays_in_vault(vault_dir):
 # --- wiring: tools stay registered (wrapper preserved the schema) ---
 
 @pytest.mark.parametrize("name", [
-    "vault_write", "vault_edit", "vault_append", "vault_move", "vault_delete",
+    "vault_write", "vault_write_binary", "vault_edit", "vault_append", "vault_move", "vault_delete",
     "vault_read", "vault_search", "vault_canvas_add_node", "vault_daily_note_append",
 ])
 def test_audited_tools_still_registered(vault_dir, name):
