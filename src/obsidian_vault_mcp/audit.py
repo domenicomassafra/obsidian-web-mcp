@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,10 @@ from .serialization import dumps
 from .vault import resolve_vault_path
 
 logger = logging.getLogger(__name__)
+
+AUDIT_LOG_MAX_BYTES = 10_000_000
+AUDIT_LOG_BACKUPS = 3
+_audit_lock = threading.Lock()
 
 # Operations that change the vault. Always audited when a log path is configured.
 MUTATION_OPERATIONS = {
@@ -213,15 +218,30 @@ def build_audit_record(
 
 
 def write_audit_record(record: dict[str, Any]) -> bool:
-    """Append one JSON record. A write failure is logged and swallowed (best-effort)."""
+    """Append one JSON record with bounded rotation.
+
+    A write/rotation failure is logged and swallowed (best-effort), preserving the
+    existing contract that audit storage cannot make a vault mutation fail.
+    """
     if not audit_enabled():
         return False
     try:
         path = audit_log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = dumps(record, sort_keys=True) + "\n"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
+        with _audit_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_file() and path.stat().st_size + len(line.encode("utf-8")) > AUDIT_LOG_MAX_BYTES:
+                oldest = path.with_name(f"{path.name}.{AUDIT_LOG_BACKUPS}")
+                if oldest.exists():
+                    oldest.unlink()
+                for index in range(AUDIT_LOG_BACKUPS - 1, 0, -1):
+                    source = path.with_name(f"{path.name}.{index}")
+                    if source.exists():
+                        source.replace(path.with_name(f"{path.name}.{index + 1}"))
+                path.replace(path.with_name(f"{path.name}.1"))
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+            path.chmod(0o600)
         return True
     except Exception as exc:
         logger.error("Audit log write failed: %s", exc)

@@ -165,6 +165,21 @@ def test_audit_write_failure_does_not_break_tool(vault_dir, monkeypatch):
         context.reset_request_context(token)
 
 
+def test_audit_log_rotation_is_bounded(audit_log, monkeypatch):
+    monkeypatch.setattr(audit, "AUDIT_LOG_MAX_BYTES", 1)
+    monkeypatch.setattr(audit, "AUDIT_LOG_BACKUPS", 3)
+
+    for index in range(6):
+        server.vault_write(f"rotated-{index}.md", str(index))
+
+    assert audit_log.exists()
+    assert audit_log.with_name(f"{audit_log.name}.1").exists()
+    assert audit_log.with_name(f"{audit_log.name}.2").exists()
+    assert audit_log.with_name(f"{audit_log.name}.3").exists()
+    assert not audit_log.with_name(f"{audit_log.name}.4").exists()
+    assert (audit_log.stat().st_mode & 0o777) == 0o600
+
+
 # --- in-vault audit log rejected (#2 integrity) ---
 
 def test_audit_path_inside_vault_detected(vault_dir, monkeypatch):
