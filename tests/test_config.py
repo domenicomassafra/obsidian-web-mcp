@@ -12,6 +12,7 @@ def _restore_config(monkeypatch):
     """Reload config after each test so the module-level parse doesn't leak."""
     yield
     monkeypatch.delenv("VAULT_MCP_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("VAULT_MCP_MAX_TOOL_RESULT_BYTES", raising=False)
     importlib.reload(config_module)
 
 
@@ -26,6 +27,25 @@ def test_allowed_hosts_parsed_stripped_and_compacted(monkeypatch):
     cfg = importlib.reload(config_module)
     # Whitespace trimmed; empty fragments (trailing comma) dropped.
     assert cfg.VAULT_MCP_ALLOWED_HOSTS == ["vault-mcp.example.com", "second.example.com"]
+
+
+def test_tool_result_byte_limit_defaults_to_256_kib(monkeypatch):
+    monkeypatch.delenv("VAULT_MCP_MAX_TOOL_RESULT_BYTES", raising=False)
+    cfg = importlib.reload(config_module)
+    assert cfg.MAX_TOOL_RESULT_BYTES == 256 * 1024
+
+
+def test_tool_result_byte_limit_accepts_operator_override(monkeypatch):
+    monkeypatch.setenv("VAULT_MCP_MAX_TOOL_RESULT_BYTES", "131072")
+    cfg = importlib.reload(config_module)
+    assert cfg.MAX_TOOL_RESULT_BYTES == 131072
+
+
+@pytest.mark.parametrize("value", ["invalid", "1023", "0", "-1"])
+def test_tool_result_byte_limit_fails_closed(monkeypatch, value):
+    monkeypatch.setenv("VAULT_MCP_MAX_TOOL_RESULT_BYTES", value)
+    with pytest.raises(ValueError, match="VAULT_MCP_MAX_TOOL_RESULT_BYTES"):
+        importlib.reload(config_module)
 
 
 def test_server_appends_to_loopback_defaults(monkeypatch):

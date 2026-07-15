@@ -161,6 +161,30 @@ DEFAULT_SEARCH_RESULTS = 20
 MAX_LIST_DEPTH = 5            # Max directory recursion depth
 CONTEXT_LINES = 2             # Default lines of context in search results
 
+# Serialized tool results are embedded in an outer MCP/JSON-RPC response. Keep
+# the inner JSON bounded so a large existing note, Canvas, batch read, or diff
+# cannot exhaust a connector's context or response budget. The envelope used
+# when a result is omitted is deliberately small, so reject limits below 1 KiB.
+MIN_TOOL_RESULT_BYTES = 1_024
+
+
+def _tool_result_byte_limit() -> int:
+    raw = os.environ.get("VAULT_MCP_MAX_TOOL_RESULT_BYTES", str(256 * 1_024))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "VAULT_MCP_MAX_TOOL_RESULT_BYTES must be an integer number of bytes"
+        ) from exc
+    if value < MIN_TOOL_RESULT_BYTES:
+        raise ValueError(
+            f"VAULT_MCP_MAX_TOOL_RESULT_BYTES must be at least {MIN_TOOL_RESULT_BYTES}"
+        )
+    return value
+
+
+MAX_TOOL_RESULT_BYTES = _tool_result_byte_limit()
+
 # Directories to never expose or modify
 EXCLUDED_DIRS = {".obsidian", ".trash", ".git", ".DS_Store"}
 
