@@ -19,6 +19,7 @@ class FrontmatterIndex:
 
     def __init__(self) -> None:
         self._index: dict[str, dict] = {}
+        self._fingerprints: dict[str, tuple[int, int]] = {}
         self._lock = threading.Lock()
         self._observer: Observer | None = None
         self._debounce_timer: threading.Timer | None = None
@@ -66,6 +67,7 @@ class FrontmatterIndex:
         swap, which is acceptable as bounded staleness (the next flush/rebuild heals).
         """
         new_index: dict[str, dict] = {}
+        new_fingerprints: dict[str, tuple[int, int]] = {}
         for md_path in config.VAULT_PATH.rglob("*.md"):
             if self._is_excluded(md_path):
                 continue
@@ -73,8 +75,14 @@ class FrontmatterIndex:
             fm = self._parse_frontmatter(md_path)
             if fm is not None:
                 new_index[rel] = fm
+                try:
+                    stat = md_path.stat()
+                    new_fingerprints[rel] = (stat.st_mtime_ns, stat.st_size)
+                except OSError:
+                    pass
         with self._lock:
             self._index = new_index
+            self._fingerprints = new_fingerprints
 
     def stop(self) -> None:
         """Stop the filesystem observer and cancel any pending debounce."""
@@ -109,6 +117,10 @@ class FrontmatterIndex:
         Returns:
             List of {"path": relative_path, "frontmatter": dict}.
         """
+        # Revalidate the indexed paths before matching. Watchdog is eventually
+        # consistent; a synchronous write event heals the normal mutation path, while
+        # this floor prevents stale/ghost results after external edits or a missed event.
+        self._revalidate()
         results: list[dict] = []
         with self._lock:
             for rel_path, fm in self._index.items():
@@ -116,14 +128,68 @@ class FrontmatterIndex:
                     continue
                 if match_type == "exists":
                     if field in fm:
-                        results.append({"path": rel_path, "frontmatter": fm})
+                        results.append({"path": rel_path, "frontmatter": dict(fm)})
                 elif match_type == "exact":
                     if field in fm and str(fm[field]) == value:
-                        results.append({"path": rel_path, "frontmatter": fm})
+                        results.append({"path": rel_path, "frontmatter": dict(fm)})
                 elif match_type == "contains":
                     if field in fm and value.lower() in str(fm[field]).lower():
-                        results.append({"path": rel_path, "frontmatter": fm})
+                        results.append({"path": rel_path, "frontmatter": dict(fm)})
         return results
+
+    def sync_write(self, operation: str, paths: list[str]) -> None:
+        """Apply a successful mutation to the index synchronously.
+
+        This is intentionally separate from the watchdog debounce path: tool results
+        must not race the index update. The later watcher event is harmless because
+        the operation is idempotent.
+        """
+        for rel in paths:
+            if not isinstance(rel, str) or not rel:
+                continue
+            try:
+                abs_path = (config.VAULT_PATH / rel).resolve()
+                abs_path.relative_to(config.VAULT_PATH.resolve())
+            except (OSError, ValueError):
+                continue
+            if abs_path.suffix != ".md":
+                continue
+            self._sync_path(abs_path)
+
+    def _sync_path(self, abs_path: Path) -> None:
+        rel = str(abs_path.relative_to(config.VAULT_PATH))
+        with self._lock:
+            if self._is_excluded(abs_path) or not abs_path.is_file():
+                self._index.pop(rel, None)
+                self._fingerprints.pop(rel, None)
+                return
+        fm = self._parse_frontmatter(abs_path)
+        with self._lock:
+            if fm is None:
+                self._index.pop(rel, None)
+                self._fingerprints.pop(rel, None)
+            else:
+                self._index[rel] = fm
+                try:
+                    stat = abs_path.stat()
+                    self._fingerprints[rel] = (stat.st_mtime_ns, stat.st_size)
+                except OSError:
+                    self._fingerprints.pop(rel, None)
+
+    def _revalidate(self) -> None:
+        with self._lock:
+            paths = list(self._fingerprints)
+        for rel in paths:
+            abs_path = config.VAULT_PATH / rel
+            try:
+                stat = abs_path.stat()
+                fingerprint = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                fingerprint = None
+            with self._lock:
+                known = self._fingerprints.get(rel)
+            if fingerprint != known:
+                self._sync_path(abs_path)
 
     # -- Internal helpers --
 

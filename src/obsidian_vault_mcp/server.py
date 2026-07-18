@@ -7,6 +7,7 @@ Designed to run behind Cloudflare Tunnel for secure remote access.
 import atexit
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -44,6 +45,7 @@ from .audit import (
     write_audit_record,
 )
 from .rate_limit import check_tool_rate_limit
+from .write_events import register_write_listener
 
 logger = logging.getLogger(__name__)
 
@@ -809,6 +811,12 @@ def serve(extensions=()):
     behavior is identical to the stock server.
     """
     extensions = tuple(extensions)  # consumed multiple times; never a generator
+    # The historical 13-tool Life OS/Poke contract is opt-in so donor tests and
+    # stock deployments remain exactly 20 tools. The canonical MiniPC candidate
+    # enables it inside this same process; no second HTTP MCP server is started.
+    if os.environ.get("VAULT_ENABLE_LIFEOS_COMPAT", "").strip() == "1":
+        from .legacy.extension import LegacyLifeOsExtension
+        extensions = (LegacyLifeOsExtension(), *extensions)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -856,6 +864,10 @@ def serve(extensions=()):
     for ext in extensions:
         ext.register_tools(mcp)
         ext.before_indexes_start(frontmatter_index)
+
+    # Keep mutation results and frontmatter search in the same consistency window.
+    # The watcher remains a recovery path for external edits.
+    register_write_listener(frontmatter_index.sync_write)
 
     # Build the frontmatter index ONCE, before serving. With stateless_http the
     # per-request MCP lifespan would otherwise rebuild it on every request (#28).

@@ -1,0 +1,517 @@
+{
+  "name": "life-os-mcp-gateway",
+  "status": "draft-v3-life-os-v1-areas-first",
+  "created": "2026-06-09",
+  "updated": "2026-06-14",
+  "goal": "Expose the integrated Notion + Obsidian Life OS to Poke, Hermes and other agents through narrow, logged tools with clear Poke-facing names.",
+  "non_goal": "Do not expose unrestricted read/write access to the whole Obsidian vault or the whole Notion workspace.",
+  "tool_naming": {
+    "public_rule": "Published tool names are lower_snake_case and name the owner first: lifeos_, obsidian_, notion_, calendar_, project_, agent_.",
+    "compatibility_rule": "The gateway may accept old v1 tool names as hidden aliases, but tools/list should advertise the v2 names."
+  },
+  "authoritative_sources": {
+    "operational_records": "Notion",
+    "canonical_memory": "Obsidian",
+    "hard_calendar_events": "Google Calendar",
+    "calendar_interface": "Notion Calendar",
+    "agent_runtime": "Hermes / MCP gateway logs"
+  },
+  "transports": {
+    "poke": "Remote HTTPS MCP server or local server exposed through Poke tunnel",
+    "hermes": "Local or LAN MCP client/server depending on Mini PC deployment",
+    "codex": "Local filesystem and Notion connector during interactive implementation"
+  },
+  "guards": {
+    "delete": "disabled in v1",
+    "obsidian_write_allowed_paths": [
+      "01-input/capture/",
+      "01-input/sources/",
+      "02-workbench/analysis/agent-inbox/"
+    ],
+    "obsidian_write_blocked_paths": [
+      "05-knowledge/",
+      "09-archive/",
+      "01-input/sources/raw/"
+    ],
+    "notion_write_allowed_databases": [
+      "Action Items",
+      "Daily Log",
+      "Capture Inbox",
+      "Reviews"
+    ],
+    "notion_write_blocked_databases": [
+      "Knowledge Index synced fields except through Obsidian publish pipeline",
+      "Registry / Mutation Log except during audited live build preflight"
+    ],
+    "audit_log_required": true,
+    "dry_run_required_for_bulk_changes": true
+  },
+  "tools": [
+    {
+      "name": "lifeos_today_brief",
+      "owner": "gateway",
+      "mode": "read",
+      "description": "Get a compact Life OS brief for a date: queue counts, gateway health, recent captures and recent Area/project/canon activity. Use this before planning the day.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "YYYY-MM-DD, defaults to today"
+          }
+        }
+      },
+      "writes": []
+    },
+    {
+      "name": "lifeos_search",
+      "owner": "gateway",
+      "mode": "read",
+      "description": "Search the local Life OS across scoped Obsidian and staging surfaces. Returns paths, line numbers and short snippets.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "all",
+              "projects",
+              "areas",
+              "knowledge",
+              "compiled-wikis",
+              "capture",
+              "sources",
+              "workbench",
+              "agent-inbox",
+              "notion-operational",
+              "obsidian-knowledge",
+              "daily"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 25
+          }
+        }
+      },
+      "writes": []
+    },
+    {
+      "name": "lifeos_recent_activity",
+      "owner": "gateway",
+      "mode": "read",
+      "description": "List recently modified notes/files for a Life OS scope. Use when Poke needs to know what changed recently before answering.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "all",
+              "projects",
+              "areas",
+              "knowledge",
+              "compiled-wikis",
+              "capture",
+              "sources",
+              "workbench",
+              "agent-inbox",
+              "daily"
+            ],
+            "default": "all"
+          },
+          "limit": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 25
+          }
+        }
+      },
+      "writes": []
+    },
+    {
+      "name": "lifeos_route_capture",
+      "owner": "gateway + router",
+      "mode": "write",
+      "description": "Route one raw user capture to the correct v1 owner: Action Items, Capture Inbox, Daily Log, Google Calendar queue, or Obsidian capture. This remains local/queued until live workspace proof.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "task",
+              "event",
+              "content",
+              "finance",
+              "people",
+              "daily_metric",
+              "knowledge",
+              "ambiguous"
+            ],
+            "default": "auto"
+          },
+          "project": {
+            "type": "string",
+            "description": "Area or finite Project name. The compatibility field name remains project."
+          },
+          "area": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "description": "Optional source label to include in audit logs"
+          }
+        }
+      },
+      "writes": [
+        "Notion:Action Items",
+        "Notion:Capture Inbox",
+        "Notion:Daily Log",
+        "GoogleCalendar:events",
+        "Obsidian:01-input/capture/"
+      ]
+    },
+    {
+      "name": "obsidian_read_note",
+      "owner": "Obsidian read",
+      "mode": "read",
+      "description": "Read one whitelisted text note by relative vault path. Use only after search/recent_activity returns a path.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative path such as 03-projects/TND/index.md"
+          },
+          "max_chars": {
+            "type": "integer",
+            "default": 8000,
+            "minimum": 500,
+            "maximum": 20000
+          }
+        }
+      },
+      "writes": []
+    },
+    {
+      "name": "obsidian_capture_note",
+      "owner": "Obsidian capture",
+      "mode": "write",
+      "description": "Capture raw text into Obsidian inbox for later human/AI distillation. Does not write to stable knowledge.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "default": "poke"
+          },
+          "suggested_area": {
+            "type": "string"
+          },
+          "suggested_project": {
+            "type": "string"
+          }
+        }
+      },
+      "writes": [
+        "Obsidian:01-input/capture/"
+      ]
+    },
+    {
+      "name": "notion_create_task",
+      "owner": "Notion Action Items",
+      "mode": "write",
+      "description": "Create or queue exactly one operational task/action for Notion Action Items. Use for actionable commitments, not long notes.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "area": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "scheduled": {
+            "type": "string",
+            "description": "ISO date or datetime"
+          },
+          "deadline": {
+            "type": "string",
+            "description": "ISO date or datetime"
+          },
+          "context": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "obsidian_context_uri": {
+            "type": "string"
+          }
+        }
+      },
+      "writes": [
+        "Notion:Action Items"
+      ]
+    },
+    {
+      "name": "notion_create_content_idea",
+      "owner": "Notion Capture Inbox",
+      "mode": "write",
+      "description": "Create or queue exactly one content idea into Capture Inbox for triage. Content Ops is parked in Life OS v1.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "lane": {
+            "type": "string",
+            "enum": [
+              "Divulgazione",
+              "Creator spagnolo",
+              "AIconic"
+            ]
+          },
+          "format": {
+            "type": "string"
+          },
+          "source_uri": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "area": {
+            "type": "string",
+            "description": "Optional Area label, e.g. Divulgazione AI / marketing"
+          },
+          "project": {
+            "type": "string",
+            "description": "Optional finite project label"
+          }
+        }
+      },
+      "writes": [
+        "Notion:Capture Inbox"
+      ]
+    },
+    {
+      "name": "notion_log_daily_metric",
+      "owner": "Notion Daily Log / Obsidian capture",
+      "mode": "write",
+      "description": "Log one structured daily metric to the Notion Daily Log queue, or capture narrative daily text into Obsidian inbox.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "work_hours",
+              "output_count",
+              "health_score",
+              "discipline_score",
+              "money_admin_done",
+              "narrative"
+            ]
+          },
+          "value": {},
+          "date": {
+            "type": "string",
+            "description": "YYYY-MM-DD, defaults to today"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      },
+      "writes": [
+        "Notion:Daily Log",
+        "Obsidian:01-input/capture/"
+      ]
+    },
+    {
+      "name": "calendar_queue_event",
+      "owner": "Google Calendar queue",
+      "mode": "write",
+      "description": "Queue exactly one hard calendar event for later Google Calendar/Notion Calendar sync. Does not directly create the live event in v2.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "title",
+          "when"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "when": {
+            "type": "string",
+            "description": "Natural or ISO date/time text"
+          },
+          "duration_minutes": {
+            "type": "integer"
+          },
+          "location": {
+            "type": "string"
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      },
+      "writes": [
+        "GoogleCalendar:events"
+      ]
+    },
+    {
+      "name": "project_get_brief",
+      "owner": "Notion Projects + Obsidian Area/Project hub",
+      "mode": "read",
+      "description": "Get local Area/Project evidence and a reminder that live Notion state is not queried here.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "project"
+        ],
+        "properties": {
+          "project": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "default": 8,
+            "minimum": 1,
+            "maximum": 20
+          }
+        }
+      },
+      "writes": []
+    },
+    {
+      "name": "project_capture_update",
+      "owner": "Obsidian Area/Project capture",
+      "mode": "write",
+      "description": "Capture one Area or finite-project update into Obsidian for later distillation. Compatibility project values matching a canonical Area are normalized to area.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "area"
+            ]
+          },
+          {
+            "required": [
+              "project"
+            ]
+          }
+        ],
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Optional finite project label."
+          },
+          "area": {
+            "type": "string",
+            "description": "Optional evergreen Area label."
+          },
+          "text": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "default": "poke"
+          }
+        }
+      },
+      "writes": [
+        "Obsidian:01-input/capture/"
+      ]
+    },
+    {
+      "name": "agent_review_errors",
+      "owner": "gateway",
+      "mode": "read",
+      "description": "List recent failed or review-worthy gateway/router events. Use when Poke suspects a sync, routing or write issue.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "resolved",
+              "all"
+            ],
+            "default": "open"
+          },
+          "limit": {
+            "type": "integer",
+            "default": 20,
+            "minimum": 1,
+            "maximum": 50
+          }
+        }
+      },
+      "writes": []
+    }
+  ]
+}
