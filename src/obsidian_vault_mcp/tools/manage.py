@@ -3,7 +3,7 @@
 import logging
 
 from ..serialization import dumps
-from ..vault import list_directory, move_path, delete_path
+from ..vault import archive_policy_receipt, list_directory, move_path, delete_path
 from ..write_events import fire_write
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ def vault_list(
     include_files: bool = True,
     include_dirs: bool = True,
     pattern: str | None = None,
+    include_archives: bool = False,
 ) -> str:
     """List directory contents in the vault."""
     try:
@@ -24,8 +25,13 @@ def vault_list(
             include_files=include_files,
             include_dirs=include_dirs,
             pattern=pattern,
+            include_archives=include_archives,
         )
-        return dumps({"items": items, "total": len(items)})
+        return dumps({
+            "items": items,
+            "total": len(items),
+            "archive_policy": archive_policy_receipt(include_archives),
+        })
     except ValueError as e:
         return dumps({"error": str(e)})
     except FileNotFoundError:

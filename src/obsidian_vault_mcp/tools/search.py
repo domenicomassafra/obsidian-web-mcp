@@ -10,7 +10,12 @@ import frontmatter
 
 from .. import config
 from ..serialization import dumps
-from ..vault import resolve_vault_path
+from ..vault import (
+    archive_policy_receipt,
+    is_archive_path,
+    is_hidden_read_allowed,
+    resolve_vault_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +26,7 @@ def _search_ripgrep(
     file_pattern: str,
     max_results: int,
     context_lines: int,
+    include_archives: bool = False,
 ) -> list[dict]:
     """Search using ripgrep for performance."""
     cmd = [
@@ -34,6 +40,8 @@ def _search_ripgrep(
 
     for excluded in config.EXCLUDED_DIRS:
         cmd.append(f"--glob=!{excluded}/")
+    if not include_archives:
+        cmd.extend(("--glob=!09-archive/**", "--glob=!**/archive/**"))
 
     # Pass the user-supplied query with `-e` so a value beginning with "-"
     # (e.g. "--pre=/bin/sh", a ripgrep preprocessor flag that executes an
@@ -63,6 +71,8 @@ def _search_ripgrep(
                 rel_path = str(Path(file_path).relative_to(config.VAULT_PATH))
             except ValueError:
                 continue
+            if is_archive_path(rel_path) and not include_archives:
+                continue
 
             line_number = match_data["line_number"]
             line_text = match_data["lines"]["text"].rstrip("\n")
@@ -85,6 +95,7 @@ def _search_python(
     file_pattern: str,
     max_results: int,
     context_lines: int,
+    include_archives: bool = False,
 ) -> list[dict]:
     """Fallback Python-based search."""
     import fnmatch
@@ -97,6 +108,14 @@ def _search_python(
             continue
 
         if any(part in config.EXCLUDED_DIRS for part in file_path.parts):
+            continue
+        try:
+            rel_path = str(file_path.relative_to(config.VAULT_PATH))
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in Path(rel_path).parts) and not is_hidden_read_allowed(rel_path):
+            continue
+        if is_archive_path(rel_path) and not include_archives:
             continue
 
         if not fnmatch.fnmatch(file_path.name, file_pattern):
@@ -113,11 +132,6 @@ def _search_python(
                 start = max(0, i - context_lines)
                 end = min(len(lines), i + context_lines + 1)
                 context = "\n".join(lines[start:end])
-
-                try:
-                    rel_path = str(file_path.relative_to(config.VAULT_PATH))
-                except ValueError:
-                    continue
 
                 matches.append({
                     "path": rel_path,
@@ -150,11 +164,17 @@ def vault_search(
     file_pattern: str = "*.md",
     max_results: int = 20,
     context_lines: int = 2,
+    include_archives: bool = False,
 ) -> str:
     """Search for text across vault files."""
     try:
         if path_prefix:
-            search_path = resolve_vault_path(path_prefix)
+            if is_archive_path(path_prefix) and not include_archives:
+                return dumps({
+                    "error": "Archive path requires include_archives=true",
+                    "archive_policy": archive_policy_receipt(include_archives),
+                })
+            search_path = resolve_vault_path(path_prefix, allow_hidden_read=True)
         else:
             search_path = config.VAULT_PATH
 
@@ -162,9 +182,13 @@ def vault_search(
             return dumps({"error": f"Search path is not a directory: {path_prefix}"})
 
         if shutil.which("rg"):
-            matches = _search_ripgrep(query, search_path, file_pattern, max_results, context_lines)
+            matches = _search_ripgrep(
+                query, search_path, file_pattern, max_results, context_lines, include_archives
+            )
         else:
-            matches = _search_python(query, search_path, file_pattern, max_results, context_lines)
+            matches = _search_python(
+                query, search_path, file_pattern, max_results, context_lines, include_archives
+            )
 
         for match in matches:
             file_full_path = config.VAULT_PATH / match["path"]
@@ -176,6 +200,8 @@ def vault_search(
             "results": matches,
             "total_matches": len(matches),
             "truncated": truncated,
+            "declared_limit": max_results,
+            "archive_policy": archive_policy_receipt(include_archives),
         })
     except ValueError as e:
         return dumps({"error": str(e)})
@@ -190,6 +216,7 @@ def vault_search_frontmatter(
     match_type: str = "exact",
     path_prefix: str | None = None,
     max_results: int = 20,
+    include_archives: bool = False,
 ) -> str:
     """Search vault files by frontmatter field values using the in-memory index."""
     from ..server import frontmatter_index
@@ -200,6 +227,7 @@ def vault_search_frontmatter(
             value=value,
             match_type=match_type,
             path_prefix=path_prefix,
+            include_archives=include_archives,
         )
 
         formatted = []
@@ -219,6 +247,8 @@ def vault_search_frontmatter(
             "results": formatted,
             "total": len(formatted),
             "truncated": truncated,
+            "declared_limit": max_results,
+            "archive_policy": archive_policy_receipt(include_archives),
         })
     except Exception as e:
         logger.error(f"vault_search_frontmatter error: {e}")

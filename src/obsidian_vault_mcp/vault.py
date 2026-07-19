@@ -6,12 +6,50 @@ import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from . import config
 
 
-def resolve_vault_path(relative_path: str) -> Path:
+ARCHIVE_PATTERNS = ("09-archive/**", "**/archive/**")
+_HIDDEN_READ_FILES = {
+    ".agents/NOTICE.md",
+    ".agents/NOTICES.md",
+    ".agents/THIRD_PARTY_NOTICES.md",
+}
+
+
+def _clean_relative_path(relative_path: str) -> str:
+    return str(PurePath(relative_path)).replace("\\", "/")
+
+
+def is_archive_path(relative_path: str | Path) -> bool:
+    """Return whether a vault-relative path belongs to a non-canonical archive."""
+    parts = tuple(part.casefold() for part in Path(str(relative_path)).parts)
+    return bool(parts) and (parts[0] == "09-archive" or "archive" in parts)
+
+
+def archive_policy_receipt(include_archives: bool) -> dict:
+    """Return the stable, body-free archive decision attached to read receipts."""
+    return {
+        "include_archives": include_archives,
+        "decision": "included_explicitly" if include_archives else "excluded_by_default",
+        "default_exclusions": list(ARCHIVE_PATTERNS),
+    }
+
+
+def is_hidden_read_allowed(relative_path: str) -> bool:
+    """Allow only published skill files and notices beneath the hidden agent tree."""
+    normalized = _clean_relative_path(relative_path).strip("/")
+    parts = Path(normalized).parts
+    if normalized in _HIDDEN_READ_FILES:
+        return True
+    if len(parts) >= 2 and parts[:2] == (".agents", "skills"):
+        return not any(part.startswith(".") for part in parts[2:])
+    return False
+
+
+def resolve_vault_path(relative_path: str, *, allow_hidden_read: bool = False) -> Path:
     """Resolve a relative path against the vault root, with safety checks.
 
     Raises ValueError if the path escapes the vault, contains null bytes,
@@ -20,10 +58,12 @@ def resolve_vault_path(relative_path: str) -> Path:
     if "\x00" in relative_path:
         raise ValueError("Path contains null bytes")
 
-    # Check for dot-prefixed components (blocks .obsidian, .trash, dotfiles)
+    hidden_allowed = allow_hidden_read and is_hidden_read_allowed(relative_path)
+    # Check for dot-prefixed components (blocks .obsidian, .trash, dotfiles).
+    # The sole exception is the narrow read-only .agents publication surface.
     parts = Path(relative_path).parts
     for part in parts:
-        if part.startswith("."):
+        if part.startswith(".") and not hidden_allowed:
             raise ValueError(
                 f"Path component '{part}' starts with '.'; dotfiles and hidden directories are not allowed"
             )
@@ -42,12 +82,12 @@ def _iso_timestamp(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
-def read_file(relative_path: str) -> tuple[str, dict]:
+def read_file(relative_path: str, *, allow_hidden_read: bool = False) -> tuple[str, dict]:
     """Read a file and return (content, metadata).
 
     Metadata keys: size (int), modified (ISO str), created (ISO str).
     """
-    path = resolve_vault_path(relative_path)
+    path = resolve_vault_path(relative_path, allow_hidden_read=allow_hidden_read)
 
     if not path.is_file():
         raise FileNotFoundError(f"Not a file: {relative_path}")
@@ -254,6 +294,7 @@ def list_directory(
     include_files: bool = True,
     include_dirs: bool = True,
     pattern: str | None = None,
+    include_archives: bool = False,
 ) -> list[dict]:
     """List directory contents recursively up to *depth* levels.
 
@@ -262,7 +303,9 @@ def list_directory(
     """
     depth = min(depth, config.MAX_LIST_DEPTH)
 
-    root = resolve_vault_path(relative_path)
+    root = resolve_vault_path(relative_path, allow_hidden_read=True)
+    if is_archive_path(relative_path) and not include_archives:
+        raise ValueError("Archive path requires include_archives=true")
     if not root.is_dir():
         raise NotADirectoryError(f"Not a directory: {relative_path}")
 
@@ -305,6 +348,8 @@ def list_directory(
                 continue
 
             rel = str(entry.relative_to(vault_root))
+            if is_archive_path(rel) and not include_archives:
+                continue
 
             results.append({
                 "name": entry.name,

@@ -40,6 +40,10 @@ class VaultReadInput(BaseModel):
         min_length=1,
         max_length=500,
     )
+    include_archives: bool = Field(
+        default=False,
+        description="Allow an explicit read from 09-archive/** or **/archive/**; default false",
+    )
 
 
 class VaultWriteInput(BaseModel):
@@ -234,6 +238,10 @@ class VaultListInput(BaseModel):
         description="Optional glob pattern to filter results (e.g. '*.md')",
         max_length=100,
     )
+    include_archives: bool = Field(
+        default=False,
+        description="Include non-canonical archive directories and files; default false",
+    )
 
 
 class VaultMoveInput(BaseModel):
@@ -309,6 +317,10 @@ class VaultSearchInput(BaseModel):
         le=10,
         description="Number of lines of context to show around each match",
     )
+    include_archives: bool = Field(
+        default=False,
+        description="Include matches under 09-archive/** and **/archive/**; default false",
+    )
 
 
 class VaultSearchFrontmatterInput(BaseModel):
@@ -342,6 +354,10 @@ class VaultSearchFrontmatterInput(BaseModel):
         le=MAX_SEARCH_RESULTS,
         description="Maximum number of matching files to return",
     )
+    include_archives: bool = Field(
+        default=False,
+        description="Include indexed archive matches; default false",
+    )
 
 
 class VaultBatchReadInput(BaseModel):
@@ -358,6 +374,10 @@ class VaultBatchReadInput(BaseModel):
     include_content: bool = Field(
         default=True,
         description="If false, return metadata only (frontmatter, size) without file body",
+    )
+    include_archives: bool = Field(
+        default=False,
+        description="Allow explicit archive paths in this batch; default false",
     )
 
 

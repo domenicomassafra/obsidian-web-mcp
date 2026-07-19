@@ -14,9 +14,11 @@ import time
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
+from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 
 from .config import (
     VAULT_AUDIT_LOG_INCLUDE_READS,
@@ -45,6 +47,7 @@ from .audit import (
     write_audit_record,
 )
 from .rate_limit import check_tool_rate_limit
+from .serialization import dumps
 from .write_events import register_write_listener
 
 logger = logging.getLogger(__name__)
@@ -158,7 +161,14 @@ from .tools.daily import (
     _today,
     vault_daily_note_path as _vault_daily_note_path,
     vault_daily_note_read as _vault_daily_note_read,
+    vault_daily_note_read_range as _vault_daily_note_read_range,
     vault_daily_note_append as _vault_daily_note_append,
+)
+from .context_engine import (
+    bootstrap_status as _bootstrap_status,
+    propose_context as _propose_context,
+    read_context as _read_context,
+    route_context as _route_context,
 )
 from .tools.analytics import (
     vault_analytics_summary as _vault_analytics_summary,
@@ -323,24 +333,42 @@ def _run_audited_batch(operation: str, func, context: dict) -> str:
 
 @mcp.tool(
     name="vault_read",
-    description="Read a file from the Obsidian vault, returning content, metadata, and parsed YAML frontmatter.",
+    description=(
+        "Read one vault file with content, metadata and parsed YAML frontmatter. "
+        "Archives are blocked by default; include_archives=true is explicit and receipted. "
+        "Only .agents/skills/** and notice files are readable among hidden paths."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
-def vault_read(path: str) -> str:
+def vault_read(path: str, include_archives: bool = False) -> str:
     """Read a file from the vault."""
-    inp = VaultReadInput(path=path)
-    return _run_audited("vault_read", lambda: _vault_read(inp.path), path=inp.path)
+    inp = VaultReadInput(path=path, include_archives=include_archives)
+    return _run_audited(
+        "vault_read",
+        lambda: _vault_read(inp.path, inp.include_archives),
+        path=inp.path,
+    )
 
 
 @mcp.tool(
     name="vault_batch_read",
-    description="Read multiple files from the vault in one call. Handles missing files gracefully.",
+    description=(
+        "Read multiple vault files in one call and report missing files individually. "
+        "Archives are blocked by default; include_archives=true is explicit and receipted."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
-def vault_batch_read(paths: list[str], include_content: bool = True) -> str:
+def vault_batch_read(
+    paths: list[str], include_content: bool = True, include_archives: bool = False
+) -> str:
     """Read multiple files at once."""
-    inp = VaultBatchReadInput(paths=paths, include_content=include_content)
-    return _run_audited("vault_batch_read", lambda: _vault_batch_read(inp.paths, inp.include_content))
+    inp = VaultBatchReadInput(
+        paths=paths, include_content=include_content, include_archives=include_archives
+    )
+    return _run_audited(
+        "vault_batch_read",
+        lambda: _vault_batch_read(inp.paths, inp.include_content, inp.include_archives),
+    )
 
 
 @mcp.tool(
@@ -461,7 +489,11 @@ def vault_batch_frontmatter_update(updates: list[FrontmatterUpdateInput]) -> str
 
 @mcp.tool(
     name="vault_search",
-    description="Search for text across vault files. Uses ripgrep if available, falls back to Python. Returns matching lines with context and frontmatter excerpts.",
+    description=(
+        "Search vault text with at most 100 results and 10 context lines per match. "
+        "Returns matching lines and frontmatter excerpts; archives are excluded by "
+        "default and included only with include_archives=true."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
 def vault_search(
@@ -470,18 +502,37 @@ def vault_search(
     file_pattern: str = "*.md",
     max_results: int = 20,
     context_lines: int = 2,
+    include_archives: bool = False,
 ) -> str:
     """Search vault file contents."""
-    inp = VaultSearchInput(query=query, path_prefix=path_prefix, file_pattern=file_pattern, max_results=max_results, context_lines=context_lines)
+    inp = VaultSearchInput(
+        query=query,
+        path_prefix=path_prefix,
+        file_pattern=file_pattern,
+        max_results=max_results,
+        context_lines=context_lines,
+        include_archives=include_archives,
+    )
     return _run_audited(
         "vault_search",
-        lambda: _vault_search(inp.query, inp.path_prefix, inp.file_pattern, inp.max_results, inp.context_lines),
+        lambda: _vault_search(
+            inp.query,
+            inp.path_prefix,
+            inp.file_pattern,
+            inp.max_results,
+            inp.context_lines,
+            inp.include_archives,
+        ),
     )
 
 
 @mcp.tool(
     name="vault_search_frontmatter",
-    description="Search vault files by YAML frontmatter field values. Queries an in-memory index for fast results. Supports exact match, contains, and field-exists queries.",
+    description=(
+        "Search the revalidated in-memory frontmatter index with exact, contains or "
+        "field-exists matching and at most 100 results. Archives are excluded by "
+        "default and included only with include_archives=true."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
 def vault_search_frontmatter(
@@ -490,18 +541,37 @@ def vault_search_frontmatter(
     match_type: FrontmatterMatchType = "exact",
     path_prefix: str | None = None,
     max_results: int = 20,
+    include_archives: bool = False,
 ) -> str:
     """Search by frontmatter fields."""
-    inp = VaultSearchFrontmatterInput(field=field, value=value, match_type=match_type, path_prefix=path_prefix, max_results=max_results)
+    inp = VaultSearchFrontmatterInput(
+        field=field,
+        value=value,
+        match_type=match_type,
+        path_prefix=path_prefix,
+        max_results=max_results,
+        include_archives=include_archives,
+    )
     return _run_audited(
         "vault_search_frontmatter",
-        lambda: _vault_search_frontmatter(inp.field, inp.value, inp.match_type, inp.path_prefix, inp.max_results),
+        lambda: _vault_search_frontmatter(
+            inp.field,
+            inp.value,
+            inp.match_type,
+            inp.path_prefix,
+            inp.max_results,
+            inp.include_archives,
+        ),
     )
 
 
 @mcp.tool(
     name="vault_list",
-    description="List directory contents in the vault. Supports recursion depth, file/dir filtering, and glob patterns. Excludes .obsidian, .trash, .git directories.",
+    description=(
+        "List vault contents with recursion depth, file/directory filters and glob "
+        "patterns. Hidden secret/runtime surfaces and archives are excluded by default; "
+        "archives require include_archives=true."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
 def vault_list(
@@ -510,12 +580,27 @@ def vault_list(
     include_files: bool = True,
     include_dirs: bool = True,
     pattern: str | None = None,
+    include_archives: bool = False,
 ) -> str:
     """List vault directory contents."""
-    inp = VaultListInput(path=path, depth=depth, include_files=include_files, include_dirs=include_dirs, pattern=pattern)
+    inp = VaultListInput(
+        path=path,
+        depth=depth,
+        include_files=include_files,
+        include_dirs=include_dirs,
+        pattern=pattern,
+        include_archives=include_archives,
+    )
     return _run_audited(
         "vault_list",
-        lambda: _vault_list(inp.path, inp.depth, inp.include_files, inp.include_dirs, inp.pattern),
+        lambda: _vault_list(
+            inp.path,
+            inp.depth,
+            inp.include_files,
+            inp.include_dirs,
+            inp.pattern,
+            inp.include_archives,
+        ),
         path=inp.path,
     )
 
@@ -601,22 +686,51 @@ def vault_canvas_add_edge(path: str, edge: CanvasEdgeInput) -> str:
 
 @mcp.tool(
     name="vault_daily_note_path",
-    description="Return today's daily-note path (server local date), derived from VAULT_DAILY_NOTES_FOLDER and VAULT_DAILY_NOTES_FORMAT. Does not read or create the file.",
+    description=(
+        "Return an arbitrary ISO-date daily-note path using Europe/Rome when date is "
+        "omitted. Derived from the configured folder and format; never reads or creates."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
-def vault_daily_note_path() -> str:
-    """Resolve today's daily-note path."""
-    return _vault_daily_note_path()
+def vault_daily_note_path(date: str | None = None) -> str:
+    """Resolve a Europe/Rome daily-note path; omit date for today."""
+    return _vault_daily_note_path(date)
 
 
 @mcp.tool(
     name="vault_daily_note_read",
-    description="Read today's daily note. Returns an error payload (does not create the note) when it does not exist.",
+    description=(
+        "Read an arbitrary ISO-date daily note, using Europe/Rome when date is omitted. "
+        "Returns an error payload and never creates a missing note."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
-def vault_daily_note_read() -> str:
-    """Read today's daily note."""
-    return _run_audited("vault_daily_note_read", _vault_daily_note_read)
+def vault_daily_note_read(date: str | None = None) -> str:
+    """Read an arbitrary Europe/Rome daily note; omit date for today."""
+    return _run_audited("vault_daily_note_read", lambda: _vault_daily_note_read(date))
+
+
+@mcp.tool(
+    name="vault_daily_note_read_range",
+    description=(
+        "Read an inclusive Europe/Rome daily-note date range. The range is limited "
+        "to 31 days, 20,000 characters per file and 80,000 characters total."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def vault_daily_note_read_range(
+    start_date: str,
+    end_date: str,
+    max_chars_per_file: Annotated[int, Field(ge=1, le=20000)] = 8000,
+    total_chars: Annotated[int, Field(ge=1, le=80000)] = 40000,
+) -> str:
+    """Read a bounded inclusive daily-note range."""
+    return _run_audited(
+        "vault_daily_note_read_range",
+        lambda: _vault_daily_note_read_range(
+            start_date, end_date, max_chars_per_file, total_chars
+        ),
+    )
 
 
 @mcp.tool(
@@ -632,6 +746,114 @@ def vault_daily_note_append(content: str) -> str:
         lambda: _vault_daily_note_append(inp.content),
         path=_daily_note_path(_today()),
     )
+
+
+@mcp.tool(
+    name="vault_bootstrap_status",
+    description=(
+        "Return the server-applied bootstrap status and hashes for AGENTS.md and "
+        "the vault operating model. Policy bodies remain server-side; degraded or "
+        "missing files are explicit."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def vault_bootstrap_status() -> str:
+    """Return the hash-bound bootstrap policy receipt."""
+    return dumps(_bootstrap_status())
+
+
+@mcp.tool(
+    name="vault_context_route",
+    description=(
+        "Classify a request deterministically and return required, selected, missing, "
+        "skipped and duplicate paths plus archive, link, policy, index and Europe/Rome date receipts."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def vault_context_route(
+    request: Annotated[str, Field(min_length=1, max_length=4000)],
+    reference_date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    include_archives: bool = False,
+) -> str:
+    """Return a body-free deterministic context route."""
+    try:
+        return dumps(_route_context(
+            request,
+            frontmatter_index,
+            reference_date=reference_date,
+            start_date=start_date,
+            end_date=end_date,
+            include_archives=include_archives,
+        ))
+    except ValueError as exc:
+        return dumps({"error": str(exc)})
+
+
+@mcp.tool(
+    name="vault_context_read",
+    description=(
+        "Route and read context in metadata, snippets, sections or full mode. "
+        "Hard limits: 20 files, 20,000 characters per file and 80,000 total; "
+        "archives remain excluded unless explicitly included."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def vault_context_read(
+    request: Annotated[str, Field(min_length=1, max_length=4000)],
+    mode: Literal["metadata", "snippets", "sections", "full"] = "sections",
+    max_files: Annotated[int, Field(ge=1, le=20)] = 12,
+    max_chars_per_file: Annotated[int, Field(ge=1, le=20000)] = 8000,
+    total_chars: Annotated[int, Field(ge=1, le=80000)] = 40000,
+    reference_date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    include_archives: bool = False,
+) -> str:
+    """Return bounded routed context with a complete selection receipt."""
+    try:
+        return dumps(_read_context(
+            request,
+            frontmatter_index,
+            mode=mode,
+            max_files=max_files,
+            max_chars_per_file=max_chars_per_file,
+            total_chars=total_chars,
+            reference_date=reference_date,
+            start_date=start_date,
+            end_date=end_date,
+            include_archives=include_archives,
+        ))
+    except ValueError as exc:
+        return dumps({"error": str(exc)})
+
+
+@mcp.tool(
+    name="vault_context_proposal",
+    description=(
+        "Produce a proposal-only plan for sensitive personal context. This tool never "
+        "writes the vault, Notion or Calendar; apply is a separate, fresh-SHA step."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def vault_context_proposal(
+    request: Annotated[str, Field(min_length=1, max_length=4000)],
+    reference_date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> str:
+    """Return a no-write proposal or an immediate-safety handoff."""
+    try:
+        return dumps(_propose_context(
+            request,
+            frontmatter_index,
+            reference_date=reference_date,
+            start_date=start_date,
+            end_date=end_date,
+        ))
+    except ValueError as exc:
+        return dumps({"error": str(exc), "write_executed": False})
 
 
 @mcp.tool(
@@ -684,6 +906,42 @@ def vault_analytics_findings(
         inp.required_frontmatter,
         inp.max_results,
     )
+
+
+_CONTEXT_PROFILE_TOOLS = frozenset({
+    "vault_bootstrap_status",
+    "vault_context_route",
+    "vault_context_read",
+    "vault_context_proposal",
+    "vault_daily_note_read_range",
+    "vault_read",
+    "vault_batch_read",
+    "vault_search",
+    "vault_search_frontmatter",
+    "vault_list",
+    "vault_write",
+    "vault_edit",
+    "vault_append",
+    "vault_move",
+    "vault_delete",
+})
+
+
+def context_profile_tool_names() -> set[str]:
+    """Return the stable ChatGPT-facing context profile without mutating registration."""
+    return set(_CONTEXT_PROFILE_TOOLS)
+
+
+def _apply_public_tool_profile() -> str:
+    """Apply a reversible public exposure profile after all implementations register."""
+    profile = os.environ.get("VAULT_PUBLIC_TOOL_PROFILE", "full").strip().lower() or "full"
+    if profile not in {"full", "context"}:
+        raise ValueError("VAULT_PUBLIC_TOOL_PROFILE must be 'full' or 'context'")
+    if profile == "context":
+        for name in list(mcp._tool_manager._tools):
+            if name not in _CONTEXT_PROFILE_TOOLS:
+                mcp.remove_tool(name)
+    return profile
 
 
 def build_app(extensions=()):
@@ -812,7 +1070,7 @@ def serve(extensions=()):
     """
     extensions = tuple(extensions)  # consumed multiple times; never a generator
     # The historical 13-tool Life OS/Poke contract is opt-in so donor tests and
-    # stock deployments remain exactly 20 tools. The canonical MiniPC candidate
+    # stock deployments retain their focused stock surface. The canonical MiniPC candidate
     # enables it inside this same process; no second HTTP MCP server is started.
     if os.environ.get("VAULT_ENABLE_LIFEOS_COMPAT", "").strip() == "1":
         from .legacy.extension import LegacyLifeOsExtension
@@ -864,6 +1122,17 @@ def serve(extensions=()):
     for ext in extensions:
         ext.register_tools(mcp)
         ext.before_indexes_start(frontmatter_index)
+
+    try:
+        public_profile = _apply_public_tool_profile()
+    except ValueError as e:
+        logger.error("Invalid public tool profile: %s", e)
+        sys.exit(1)
+    logger.info(
+        "Public tool profile: %s (%d tools)",
+        public_profile,
+        len(mcp._tool_manager._tools),
+    )
 
     # Keep mutation results and frontmatter search in the same consistency window.
     # The watcher remains a recovery path for external edits.

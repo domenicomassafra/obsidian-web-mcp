@@ -5,16 +5,22 @@ import logging
 import frontmatter
 
 from ..serialization import dumps
-from ..vault import resolve_vault_path, read_file
+from ..vault import archive_policy_receipt, is_archive_path, read_file
 
 logger = logging.getLogger(__name__)
 
 
-def vault_read(path: str) -> str:
+def vault_read(path: str, include_archives: bool = False) -> str:
     """Read a file from the vault, returning content, metadata, and parsed frontmatter."""
     try:
-        resolved = resolve_vault_path(path)
-        content, metadata = read_file(path)
+        archive_policy = archive_policy_receipt(include_archives)
+        if is_archive_path(path) and not include_archives:
+            return dumps({
+                "error": "Archive path requires include_archives=true",
+                "path": path,
+                "archive_policy": archive_policy,
+            })
+        content, metadata = read_file(path, allow_hidden_read=True)
 
         fm_data = None
         try:
@@ -29,6 +35,7 @@ def vault_read(path: str) -> str:
             "content": content,
             "metadata": metadata,
             "frontmatter": fm_data,
+            "archive_policy": archive_policy,
         })
     except ValueError as e:
         return dumps({"error": str(e), "path": path})
@@ -39,15 +46,20 @@ def vault_read(path: str) -> str:
         return dumps({"error": str(e), "path": path})
 
 
-def vault_batch_read(paths: list[str], include_content: bool = True) -> str:
+def vault_batch_read(
+    paths: list[str], include_content: bool = True, include_archives: bool = False
+) -> str:
     """Read multiple files from the vault in one call."""
     results = []
     found = 0
     missing = 0
+    archive_policy = archive_policy_receipt(include_archives)
 
     for path in paths:
         try:
-            content, metadata = read_file(path)
+            if is_archive_path(path) and not include_archives:
+                raise ValueError("Archive path requires include_archives=true")
+            content, metadata = read_file(path, allow_hidden_read=True)
 
             fm_data = None
             try:
@@ -74,4 +86,9 @@ def vault_batch_read(paths: list[str], include_content: bool = True) -> str:
             results.append({"path": path, "error": str(e)})
             missing += 1
 
-    return dumps({"files": results, "found": found, "missing": missing})
+    return dumps({
+        "files": results,
+        "found": found,
+        "missing": missing,
+        "archive_policy": archive_policy,
+    })

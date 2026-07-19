@@ -1,5 +1,7 @@
 """In-memory index of YAML frontmatter across all vault .md files."""
 
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -10,6 +12,7 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from . import config
+from .vault import is_archive_path, is_hidden_read_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +108,7 @@ class FrontmatterIndex:
         value: str,
         match_type: str,
         path_prefix: str | None = None,
+        include_archives: bool = False,
     ) -> list[dict]:
         """Search frontmatter index by field.
 
@@ -126,6 +130,8 @@ class FrontmatterIndex:
             for rel_path, fm in self._index.items():
                 if path_prefix and not rel_path.startswith(path_prefix):
                     continue
+                if is_archive_path(rel_path) and not include_archives:
+                    continue
                 if match_type == "exists":
                     if field in fm:
                         results.append({"path": rel_path, "frontmatter": dict(fm)})
@@ -136,6 +142,16 @@ class FrontmatterIndex:
                     if field in fm and value.lower() in str(fm[field]).lower():
                         results.append({"path": rel_path, "frontmatter": dict(fm)})
         return results
+
+    def snapshot_hash(self) -> str:
+        """Hash the revalidated path/frontmatter snapshot without exposing bodies."""
+        self._revalidate()
+        with self._lock:
+            snapshot = {path: self._index[path] for path in sorted(self._index)}
+        blob = json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
 
     def sync_write(self, operation: str, paths: list[str]) -> None:
         """Apply a successful mutation to the index synchronously.
@@ -195,7 +211,13 @@ class FrontmatterIndex:
 
     def _is_excluded(self, path: Path) -> bool:
         """Check whether any path component is in config.EXCLUDED_DIRS."""
-        return bool(config.EXCLUDED_DIRS & set(path.relative_to(config.VAULT_PATH).parts))
+        relative = path.relative_to(config.VAULT_PATH)
+        parts = relative.parts
+        if config.EXCLUDED_DIRS & set(parts):
+            return True
+        if any(part.startswith(".") for part in parts):
+            return not is_hidden_read_allowed(str(relative))
+        return False
 
     def _parse_frontmatter(self, path: Path) -> dict | None:
         """Parse YAML frontmatter from a markdown file. Returns None on failure."""
@@ -233,11 +255,18 @@ class FrontmatterIndex:
                 with self._lock:
                     if fm is not None:
                         self._index[rel] = fm
+                        try:
+                            stat = abs_path.stat()
+                            self._fingerprints[rel] = (stat.st_mtime_ns, stat.st_size)
+                        except OSError:
+                            self._fingerprints.pop(rel, None)
                     else:
                         self._index.pop(rel, None)
+                        self._fingerprints.pop(rel, None)
             else:
                 with self._lock:
                     self._index.pop(rel, None)
+                    self._fingerprints.pop(rel, None)
             # Notify change listeners (e.g. an extension's embedding index) outside
             # the lock. A listener failure must not stall indexing for other paths.
             for listener in self._change_listeners:
