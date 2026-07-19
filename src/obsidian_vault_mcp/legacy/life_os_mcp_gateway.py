@@ -426,6 +426,15 @@ def scope_roots(scope: str) -> list[Path]:
 
 
 def file_matches(path: Path) -> bool:
+    try:
+        root = ROOT.resolve()
+        relative = path.relative_to(ROOT)
+        lexical = root / relative
+        resolved = path.resolve()
+    except (OSError, ValueError):
+        return False
+    if resolved != lexical or (resolved != root and root not in resolved.parents):
+        return False
     if path.suffix.lower() not in TEXT_EXTENSIONS:
         return False
     try:

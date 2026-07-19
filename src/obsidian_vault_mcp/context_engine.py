@@ -21,6 +21,7 @@ from . import config
 from .vault import (
     archive_policy_receipt,
     is_archive_path,
+    is_discoverable_vault_path,
     is_hidden_read_allowed,
     read_file,
 )
@@ -245,10 +246,12 @@ def _wikilinks(content: str) -> list[str]:
 def _link_candidates(target: str) -> list[str]:
     direct = config.VAULT_PATH / target
     candidates = []
-    if direct.is_file():
+    if is_discoverable_vault_path(direct, allow_hidden_read=True) and direct.is_file():
         candidates.append(target)
     if "/" not in target:
         for path in config.VAULT_PATH.rglob(target):
+            if not is_discoverable_vault_path(path, allow_hidden_read=True):
+                continue
             try:
                 rel = str(path.relative_to(config.VAULT_PATH))
             except ValueError:

@@ -13,6 +13,7 @@ from ..serialization import dumps
 from ..vault import (
     archive_policy_receipt,
     is_archive_path,
+    is_discoverable_vault_path,
     is_hidden_read_allowed,
     resolve_vault_path,
 )
@@ -104,6 +105,8 @@ def _search_python(
     matches = []
 
     for file_path in search_path.rglob("*"):
+        if not is_discoverable_vault_path(file_path, allow_hidden_read=True):
+            continue
         if not file_path.is_file():
             continue
 

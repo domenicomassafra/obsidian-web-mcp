@@ -77,6 +77,27 @@ def resolve_vault_path(relative_path: str, *, allow_hidden_read: bool = False) -
     return resolved
 
 
+def is_discoverable_vault_path(
+    path: Path, *, allow_hidden_read: bool = False
+) -> bool:
+    """Return whether a filesystem walk may expose this canonical vault path.
+
+    Explicit reads already pass through ``resolve_vault_path``. Directory walks,
+    indexes and fallback searches also need to reject symlink aliases, otherwise
+    they can disclose names, metadata or content from another tree while still
+    presenting a vault-relative path.
+    """
+    try:
+        relative = path.relative_to(config.VAULT_PATH)
+        lexical = config.VAULT_PATH.resolve() / relative
+        resolved = resolve_vault_path(
+            str(relative), allow_hidden_read=allow_hidden_read
+        )
+    except (OSError, ValueError):
+        return False
+    return resolved == lexical
+
+
 def _iso_timestamp(ts: float) -> str:
     """Convert a Unix timestamp to an ISO 8601 string in UTC."""
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
@@ -324,6 +345,8 @@ def list_directory(
         for entry in entries:
             # Skip excluded directories at every level
             if entry.name in config.EXCLUDED_DIRS:
+                continue
+            if not is_discoverable_vault_path(entry, allow_hidden_read=True):
                 continue
 
             is_dir = entry.is_dir()

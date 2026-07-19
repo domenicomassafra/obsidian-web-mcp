@@ -12,7 +12,11 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from . import config
-from .vault import is_archive_path, is_hidden_read_allowed
+from .vault import (
+    is_archive_path,
+    is_discoverable_vault_path,
+    is_hidden_read_allowed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +215,8 @@ class FrontmatterIndex:
 
     def _is_excluded(self, path: Path) -> bool:
         """Check whether any path component is in config.EXCLUDED_DIRS."""
+        if not is_discoverable_vault_path(path, allow_hidden_read=True):
+            return True
         relative = path.relative_to(config.VAULT_PATH)
         parts = relative.parts
         if config.EXCLUDED_DIRS & set(parts):
