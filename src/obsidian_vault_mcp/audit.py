@@ -38,6 +38,14 @@ AUDIT_LOG_BACKUPS = 3
 _audit_lock = threading.Lock()
 FACT_ID_SCHEME = "obsidian-semantic-fact-v1"
 _MUTATION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_ROLLBACKABLE_TEXT_OPERATIONS = {
+    "vault_write",
+    "vault_edit",
+    "vault_append",
+    "vault_canvas_add_node",
+    "vault_canvas_add_edge",
+    "vault_daily_note_append",
+}
 _SECRET_LINE_RE = re.compile(
     r"(?i)(?:bearer\s+\S+|(?:password|passwd|token|secret|api[_-]?key)\s*[:=])"
 )
@@ -226,12 +234,15 @@ def build_mutation_receipt(
     """Build the JSON + bounded Markdown receipt returned by text mutations."""
     mutation_context = mutation_context or {}
     fact_ids = sorted({semantic_fact_id(text) for text in mutation_context.get("semantic_facts") or []})
+    source_identity = mutation_context.get("source")
     identity = {
         "request_id": record.get("request_id"),
         "operation": record.get("operation"),
         "target_path": record.get("target_path"),
         "checksum_before": record.get("checksum_before"),
         "checksum_after": record.get("checksum_after"),
+        "source_identity": source_identity,
+        "semantic_fact_ids": fact_ids,
     }
     mutation_id = hashlib.sha256(dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
     added, removed, added_lines, exact_diff = _line_delta(before_text, after_text)
@@ -242,14 +253,26 @@ def build_mutation_receipt(
         outcome = "already_applied"
     else:
         outcome = "applied"
-    if status == "success" and outcome == "applied":
+    rollback_can_restore = (
+        record.get("operation") in _ROLLBACKABLE_TEXT_OPERATIONS
+        and after_text is not None
+        and (record.get("checksum_before") is None or before_text is not None)
+    )
+    if status == "success" and outcome == "applied" and rollback_can_restore:
         rollback_status = "available" if audit_enabled() else "unavailable"
+    elif status == "success" and outcome == "applied":
+        rollback_status = "unavailable"
     else:
         rollback_status = "not_required"
     reason = mutation_context.get("reason") or "not supplied"
     section = mutation_context.get("section") or "not supplied"
     destination = mutation_context.get("destination") or record.get("target_path") or "unknown"
     safe_reason = "[redacted possible secret]" if _SECRET_LINE_RE.search(str(reason)) else str(reason)[:500]
+    rollback_summary = {
+        "available": "available with this mutation ID; guarded by postimage SHA-256.",
+        "unavailable": "unavailable for this operation.",
+        "not_required": "not required.",
+    }[rollback_status]
     markdown = "\n".join(
         [
             f"### Obsidian mutation `{mutation_id[:12]}`",
@@ -259,7 +282,7 @@ def build_mutation_receipt(
             f"- Preview: {_safe_preview(added_lines)}",
             f"- Reason / destination: {safe_reason} → {destination}",
             f"- Mutation ID: `{mutation_id}`",
-            f"- Rollback: {rollback_status} with this mutation ID; guarded by postimage SHA-256.",
+            f"- Rollback: {rollback_summary}",
         ]
     )
     return {
@@ -278,7 +301,7 @@ def build_mutation_receipt(
         "preview": _safe_preview(added_lines),
         "checksum_before": record.get("checksum_before"),
         "checksum_after": record.get("checksum_after"),
-        "source_identity": mutation_context.get("source"),
+        "source_identity": source_identity,
         "fact_id_scheme": FACT_ID_SCHEME,
         "semantic_fact_ids": fact_ids,
         "rollback": {"status": rollback_status, "mutation_id": mutation_id},
@@ -335,6 +358,8 @@ def rollback_mutation(mutation_id: str, confirm: bool = False) -> dict[str, Any]
     receipt_path = root / f"{mutation_id}.json"
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if (receipt.get("rollback") or {}).get("status") != "available":
+            return {"status": "rollback_unavailable", "mutation_id": mutation_id}
         target_path = str(receipt["target_path"])
         resolved = resolve_vault_path(target_path)
         current = _sha256_file(resolved)

@@ -153,6 +153,46 @@ def test_semantic_fact_identity_normalizes_case_and_whitespace():
     assert audit.semantic_fact_id("  Stable   Fact ") == audit.semantic_fact_id("stable fact")
 
 
+def test_binary_receipt_never_promises_an_unrestorable_rollback(audit_log):
+    payload = base64.b64encode(b"binary payload").decode()
+    result = json.loads(server.vault_write_binary("binary.pdf", payload, "application/pdf"))
+    receipt = result["mutation_receipt"]
+
+    assert receipt["outcome"] == "applied"
+    assert receipt["rollback"]["status"] == "unavailable"
+    assert "Rollback: unavailable for this operation." in receipt["markdown"]
+    assert audit.rollback_mutation(receipt["mutation_id"], confirm=True) == {
+        "status": "rollback_unavailable",
+        "mutation_id": receipt["mutation_id"],
+    }
+
+
+def test_mutation_id_binds_source_and_semantic_fact_identity(audit_log):
+    base = {
+        "timestamp": "2026-07-22T00:00:00Z",
+        "request_id": "request-1",
+        "operation": "vault_write",
+        "operation_status": "success",
+        "target_path": "note.md",
+        "checksum_before": None,
+        "checksum_after": "a" * 64,
+    }
+    first = audit.build_mutation_receipt(
+        base,
+        None,
+        "fact one",
+        {"source": {"conversation_id": "conversation-1"}, "semantic_facts": ["fact one"]},
+    )
+    second = audit.build_mutation_receipt(
+        base,
+        None,
+        "fact one",
+        {"source": {"conversation_id": "conversation-2"}, "semantic_facts": ["fact two"]},
+    )
+
+    assert first["mutation_id"] != second["mutation_id"]
+
+
 def test_binary_write_success_and_overwrite_are_audited(audit_log):
     first = base64.b64encode(b"first binary version").decode()
     second = base64.b64encode(b"second binary version").decode()

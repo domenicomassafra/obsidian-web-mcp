@@ -8,6 +8,7 @@ import atexit
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -292,8 +293,10 @@ def _run_audited(operation: str, func, **context) -> str:
         persisted = persist_mutation_receipt(receipt, before_text)
         if receipt["rollback"]["status"] == "available" and not persisted:
             receipt["rollback"]["status"] = "unavailable"
-            receipt["markdown"] = receipt["markdown"].replace(
-                "Rollback: available", "Rollback: unavailable"
+            receipt["markdown"] = re.sub(
+                r"(?m)^- Rollback:.*$",
+                "- Rollback: unavailable because the private receipt store could not be written.",
+                receipt["markdown"],
             )
         record["mutation_id"] = receipt["mutation_id"]
         record["fact_id_scheme"] = receipt["fact_id_scheme"]
