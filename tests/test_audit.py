@@ -12,6 +12,7 @@ import json
 import pytest
 
 from obsidian_vault_mcp import audit, config, context, server
+from obsidian_vault_mcp.models import VaultMutationContextInput
 
 PRINCIPAL = "test-bearer-token-abc123"
 EXPECTED_HASH = __import__("hashlib").sha256(PRINCIPAL.encode("utf-8")).hexdigest()
@@ -41,6 +42,7 @@ def test_audit_off_by_default(vault_dir, monkeypatch, tmp_path):
     log_path = tmp_path / "should-not-exist.jsonl"
     result = json.loads(server.vault_write("note.md", "body"))
     assert result["path"] == "note.md"
+    assert result["mutation_receipt"]["rollback"]["status"] == "unavailable"
     assert not log_path.exists()
     assert audit.should_audit_operation("vault_write") is False
 
@@ -86,6 +88,69 @@ def test_overwrite_captures_before_and_after(audit_log):
     assert rec["size_before"] == len(b"first version")
     assert rec["size_after"] == len(b"second, longer version")
     assert rec["checksum_before"] != rec["checksum_after"]
+
+
+def test_text_mutation_returns_markdown_provenance_and_guarded_rollback(audit_log, vault_dir):
+    server.vault_write("receipt.md", "Owner content stays.\n")
+    original = (vault_dir / "receipt.md").read_text(encoding="utf-8")
+    source = {
+        "provider": "chatgpt",
+        "conversation_id": "conversation-1",
+        "message_id": "message-2",
+        "content_sha256": "a" * 64,
+        "message_sha256": "b" * 64,
+        "channel": "chatgpt",
+    }
+    mutation = VaultMutationContextInput(
+        reason="Record the missing durable preference",
+        destination="06-life/profile.md",
+        section="Preferences",
+        source=source,
+        semantic_facts=["The owner prefers one canonical note."],
+    )
+    result = json.loads(
+        server.vault_append(
+            "receipt.md",
+            "The owner prefers one canonical note.",
+            separator="",
+            mutation=mutation,
+        )
+    )
+    receipt = result["mutation_receipt"]
+    assert receipt["outcome"] == "applied"
+    assert receipt["lines_added"] == 1
+    assert receipt["lines_removed"] == 1
+    assert receipt["section"] == "Preferences"
+    assert receipt["source_identity"] == source
+    assert receipt["semantic_fact_ids"] == [
+        audit.semantic_fact_id("The owner prefers one canonical note.")
+    ]
+    assert "### Obsidian mutation" in receipt["markdown"]
+    assert "Rollback: available" in receipt["markdown"]
+
+    receipt_path = audit.mutation_receipt_dir() / f"{receipt['mutation_id']}.json"
+    preimage_path = audit.mutation_receipt_dir() / f"{receipt['mutation_id']}.preimage"
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert preimage_path.stat().st_mode & 0o777 == 0o600
+    assert preimage_path.read_text(encoding="utf-8") == original
+    assert _records(audit_log)[-1]["semantic_fact_ids"] == receipt["semantic_fact_ids"]
+
+    rollback = audit.rollback_mutation(receipt["mutation_id"], confirm=True)
+    assert rollback["status"] == "rollback_applied"
+    assert (vault_dir / "receipt.md").read_text(encoding="utf-8") == original
+    assert audit.rollback_mutation(receipt["mutation_id"], confirm=True)["status"] == "already_rolled_back"
+
+
+def test_mutation_preview_redacts_possible_secret(audit_log):
+    mutation = VaultMutationContextInput(reason="token=never-show", semantic_facts=[])
+    result = json.loads(server.vault_write("redacted-preview.md", "api_key=never-show", mutation=mutation))
+    public = result["mutation_receipt"]
+    assert "never-show" not in public["markdown"]
+    assert "[redacted possible secret]" in public["markdown"]
+
+
+def test_semantic_fact_identity_normalizes_case_and_whitespace():
+    assert audit.semantic_fact_id("  Stable   Fact ") == audit.semantic_fact_id("stable fact")
 
 
 def test_binary_write_success_and_overwrite_are_audited(audit_log):

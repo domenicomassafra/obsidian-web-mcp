@@ -29,6 +29,35 @@ CanvasSide = Literal["top", "right", "bottom", "left"]
 ExpectedSha256 = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
 
 
+class VaultMutationSourceInput(BaseModel):
+    """Hash-bound identity of the conversation/message that caused a mutation."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    provider: str = Field(..., min_length=1, max_length=80)
+    conversation_id: str = Field(..., min_length=1, max_length=300)
+    message_id: str | None = Field(default=None, min_length=1, max_length=300)
+    content_sha256: ExpectedSha256
+    message_sha256: ExpectedSha256 | None = None
+    channel: Literal["chatgpt", "hermes", "nightly", "other"] = "other"
+
+
+class VaultMutationContextInput(BaseModel):
+    """Optional provenance used by the shared mutation receipt contract."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=500)
+    destination: str | None = Field(default=None, max_length=500)
+    section: str | None = Field(default=None, max_length=300)
+    source: VaultMutationSourceInput | None = None
+    semantic_facts: list[Annotated[str, Field(min_length=1, max_length=2000)]] = Field(
+        default_factory=list,
+        max_length=24,
+        description="Canonical fact strings; receipts persist only their normalized SHA-256 identities.",
+    )
+
+
 class VaultReadInput(BaseModel):
     """Read a single file from the vault."""
 

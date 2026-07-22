@@ -155,6 +155,17 @@ raw token is never written), `client_id` (a best-effort User-Agent hint), `opera
 {"checksum_after":"9f86d0…","checksum_before":null,"client_id":"claude","error":null,"operation":"vault_write","operation_status":"success","request_id":"a1b2…","size_after":42,"size_before":null,"target_path":"notes/today.md","timestamp":"2026-06-14T18:30:00+00:00","token_id_hash":"5e88…"}
 ```
 
+Text mutations (`vault_write`, `vault_edit`, and `vault_append`) also accept an optional
+`mutation` context with `reason`, `destination`, `section`, a source identity
+(`provider`, `conversation_id`, optional `message_id`, `content_sha256` and
+`message_sha256`) and canonical `semantic_facts`. Their JSON result contains a bounded
+`mutation_receipt.markdown` recap with the file, line delta, redacted preview, reason,
+mutation id and guarded rollback status. Owner-local JSON receipts and UTF-8 preimages are
+stored beside the audit log with mode `0600`; the receipt stores only normalized fact ids
+under `obsidian-semantic-fact-v1`, so Chat Backup nightly can recognize an
+`already_applied` fact without copying note text or credentials. Rollback refuses to run
+when the current target no longer matches the recorded postimage.
+
 **Put the log outside the vault.** `VAULT_AUDIT_LOG_PATH` must resolve outside `VAULT_PATH`.
 A log inside the vault would be just another file the vault tools can reach, so an
 authenticated caller could overwrite it (`vault_write`) or move it (`vault_delete`) and

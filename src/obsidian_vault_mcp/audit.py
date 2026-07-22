@@ -15,8 +15,11 @@ must not be able to break a write.
 from __future__ import annotations
 
 import hashlib
+import difflib
+import json
 import logging
 import os
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -26,13 +29,18 @@ from typing import Any
 from . import config
 from .context import current_request_context
 from .serialization import dumps
-from .vault import resolve_vault_path
+from .vault import resolve_vault_path, write_file_atomic
 
 logger = logging.getLogger(__name__)
 
 AUDIT_LOG_MAX_BYTES = 10_000_000
 AUDIT_LOG_BACKUPS = 3
 _audit_lock = threading.Lock()
+FACT_ID_SCHEME = "obsidian-semantic-fact-v1"
+_MUTATION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_SECRET_LINE_RE = re.compile(
+    r"(?i)(?:bearer\s+\S+|(?:password|passwd|token|secret|api[_-]?key)\s*[:=])"
+)
 
 # Operations that change the vault. Always audited when a log path is configured.
 MUTATION_OPERATIONS = {
@@ -165,6 +173,187 @@ def snapshot_path(path: Any) -> dict[str, Any]:
     if not resolved.is_file():
         return empty
     return {"size": resolved.stat().st_size, "checksum": _sha256_file(resolved)}
+
+
+def snapshot_text(path: Any) -> str | None:
+    """Read a UTF-8 pre/postimage for receipt generation; absent/binary targets return null."""
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        resolved = resolve_vault_path(path)
+        return resolved.read_text(encoding="utf-8") if resolved.is_file() else None
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def semantic_fact_id(text: str) -> str:
+    """Identity shared with the canonical nightly consumer."""
+    normalized = " ".join(text.split()).casefold()
+    return hashlib.sha256(f"{FACT_ID_SCHEME}\n{normalized}".encode("utf-8")).hexdigest()
+
+
+def mutation_receipt_dir() -> Path | None:
+    """Keep private receipts beside (never inside) the configured audit log."""
+    return audit_log_path().parent / "mutation-receipts" if audit_enabled() else None
+
+
+def _line_delta(before: str | None, after: str | None) -> tuple[int, int, list[str], str]:
+    before_lines = (before or "").splitlines(keepends=True)
+    after_lines = (after or "").splitlines(keepends=True)
+    diff_lines = list(
+        difflib.unified_diff(before_lines, after_lines, fromfile="before", tofile="after", lineterm="")
+    )
+    added = [line[1:].rstrip("\n") for line in diff_lines if line.startswith("+") and not line.startswith("+++")]
+    removed = [line[1:].rstrip("\n") for line in diff_lines if line.startswith("-") and not line.startswith("---")]
+    return len(added), len(removed), added, "".join(diff_lines)
+
+
+def _safe_preview(lines: list[str]) -> str:
+    preview: list[str] = []
+    for line in lines[:3]:
+        value = "[redacted possible secret]" if _SECRET_LINE_RE.search(line) else line.strip()
+        if value:
+            preview.append(value[:180])
+    return " / ".join(preview)[:400] or "(no added text)"
+
+
+def build_mutation_receipt(
+    record: dict[str, Any],
+    before_text: str | None,
+    after_text: str | None,
+    mutation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the JSON + bounded Markdown receipt returned by text mutations."""
+    mutation_context = mutation_context or {}
+    fact_ids = sorted({semantic_fact_id(text) for text in mutation_context.get("semantic_facts") or []})
+    identity = {
+        "request_id": record.get("request_id"),
+        "operation": record.get("operation"),
+        "target_path": record.get("target_path"),
+        "checksum_before": record.get("checksum_before"),
+        "checksum_after": record.get("checksum_after"),
+    }
+    mutation_id = hashlib.sha256(dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
+    added, removed, added_lines, exact_diff = _line_delta(before_text, after_text)
+    status = record.get("operation_status")
+    if status == "error":
+        outcome = "failed"
+    elif record.get("checksum_before") == record.get("checksum_after"):
+        outcome = "already_applied"
+    else:
+        outcome = "applied"
+    if status == "success" and outcome == "applied":
+        rollback_status = "available" if audit_enabled() else "unavailable"
+    else:
+        rollback_status = "not_required"
+    reason = mutation_context.get("reason") or "not supplied"
+    section = mutation_context.get("section") or "not supplied"
+    destination = mutation_context.get("destination") or record.get("target_path") or "unknown"
+    safe_reason = "[redacted possible secret]" if _SECRET_LINE_RE.search(str(reason)) else str(reason)[:500]
+    markdown = "\n".join(
+        [
+            f"### Obsidian mutation `{mutation_id[:12]}`",
+            f"- File: `{record.get('target_path')}`",
+            f"- Section: {section}",
+            f"- Change: +{added} / -{removed} lines ({outcome})",
+            f"- Preview: {_safe_preview(added_lines)}",
+            f"- Reason / destination: {safe_reason} → {destination}",
+            f"- Mutation ID: `{mutation_id}`",
+            f"- Rollback: {rollback_status} with this mutation ID; guarded by postimage SHA-256.",
+        ]
+    )
+    return {
+        "schema_version": 1,
+        "kind": "obsidian-mutation-receipt",
+        "mutation_id": mutation_id,
+        "timestamp": record.get("timestamp"),
+        "operation": record.get("operation"),
+        "outcome": outcome,
+        "target_path": record.get("target_path"),
+        "section": mutation_context.get("section"),
+        "reason": safe_reason,
+        "destination": destination,
+        "lines_added": added,
+        "lines_removed": removed,
+        "preview": _safe_preview(added_lines),
+        "checksum_before": record.get("checksum_before"),
+        "checksum_after": record.get("checksum_after"),
+        "source_identity": mutation_context.get("source"),
+        "fact_id_scheme": FACT_ID_SCHEME,
+        "semantic_fact_ids": fact_ids,
+        "rollback": {"status": rollback_status, "mutation_id": mutation_id},
+        "markdown": markdown,
+        "exact_diff": exact_diff,
+        "preimage_present": before_text is not None,
+    }
+
+
+def persist_mutation_receipt(receipt: dict[str, Any], before_text: str | None) -> bool:
+    """Persist exact owner-local evidence and its preimage with mode 0600."""
+    root = mutation_receipt_dir()
+    if root is None:
+        return False
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        root.chmod(0o700)
+        mutation_id = str(receipt["mutation_id"])
+        if before_text is not None:
+            preimage = root / f"{mutation_id}.preimage"
+            preimage.write_text(before_text, encoding="utf-8")
+            preimage.chmod(0o600)
+        path = root / f"{mutation_id}.json"
+        path.write_text(dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        return True
+    except Exception as exc:
+        logger.error("Mutation receipt write failed: %s", type(exc).__name__)
+        return False
+
+
+def attach_mutation_receipt(result: str, receipt: dict[str, Any]) -> str:
+    """Add the bounded public recap without changing a tool's success/error truth."""
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    public = {key: value for key, value in receipt.items() if key not in {"exact_diff", "preimage_present"}}
+    payload["mutation_receipt"] = public
+    return dumps(payload)
+
+
+def rollback_mutation(mutation_id: str, confirm: bool = False) -> dict[str, Any]:
+    """Restore a recorded text preimage only while the postimage still matches."""
+    if not confirm:
+        return {"status": "confirmation_required", "mutation_id": mutation_id}
+    if not _MUTATION_ID_RE.fullmatch(mutation_id):
+        return {"status": "invalid_mutation_id", "mutation_id": mutation_id}
+    root = mutation_receipt_dir()
+    if root is None:
+        return {"status": "receipt_store_unavailable", "mutation_id": mutation_id}
+    receipt_path = root / f"{mutation_id}.json"
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        target_path = str(receipt["target_path"])
+        resolved = resolve_vault_path(target_path)
+        current = _sha256_file(resolved)
+        before = receipt.get("checksum_before")
+        after = receipt.get("checksum_after")
+        if current == before:
+            return {"status": "already_rolled_back", "mutation_id": mutation_id, "target_path": target_path}
+        if current != after:
+            return {"status": "rollback_conflict", "mutation_id": mutation_id, "target_path": target_path}
+        if before is None:
+            resolved.unlink()
+        else:
+            preimage = (root / f"{mutation_id}.preimage").read_text(encoding="utf-8")
+            if hashlib.sha256(preimage.encode("utf-8")).hexdigest() != before:
+                return {"status": "preimage_invalid", "mutation_id": mutation_id, "target_path": target_path}
+            write_file_atomic(target_path, preimage, create_dirs=False, expected_sha256=after)
+        return {"status": "rollback_applied", "mutation_id": mutation_id, "target_path": target_path, "checksum_restored": before}
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return {"status": "receipt_invalid", "mutation_id": mutation_id}
 
 
 def before_target_path(operation: str, context: dict[str, Any]) -> Any:

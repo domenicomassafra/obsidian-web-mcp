@@ -39,11 +39,15 @@ from .audit import (
     audit_log_path,
     audit_path_inside_vault,
     audit_path_writable,
+    attach_mutation_receipt,
     before_target_path,
     build_audit_record,
+    build_mutation_receipt,
     infer_target_path,
+    persist_mutation_receipt,
     should_audit_operation,
     snapshot_path,
+    snapshot_text,
     write_audit_record,
 )
 from .rate_limit import check_tool_rate_limit
@@ -182,6 +186,7 @@ from .models import (
     VaultEditOperationInput,
     VaultEditInput,
     VaultAppendInput,
+    VaultMutationContextInput,
     VaultBatchReadInput,
     FrontmatterUpdateInput,
     VaultBatchFrontmatterUpdateInput,
@@ -245,25 +250,28 @@ def _run_audited(operation: str, func, **context) -> str:
             ))
         return result
 
-    if not should_audit_operation(operation):
+    audited = should_audit_operation(operation)
+    is_mutation = operation in MUTATION_OPERATIONS
+    if not audited and not is_mutation:
         return func()
 
-    if operation in BATCH_OPERATIONS:
+    if operation in BATCH_OPERATIONS and audited:
         return _run_audited_batch(operation, func, context)
 
-    is_mutation = operation in MUTATION_OPERATIONS
     before = snapshot_path(before_target_path(operation, context)) if is_mutation else None
+    before_text = snapshot_text(before_target_path(operation, context)) if is_mutation else None
 
     try:
         result = func()
     except Exception:
-        write_audit_record(build_audit_record(
-            operation=operation,
-            target_path=infer_target_path(operation, context),
-            before=before,
-            operation_status="error",
-            error="tool exception",
-        ))
+        if audited:
+            write_audit_record(build_audit_record(
+                operation=operation,
+                target_path=infer_target_path(operation, context),
+                before=before,
+                operation_status="error",
+                error="tool exception",
+            ))
         raise
 
     parsed = _parse_tool_result(result)
@@ -275,13 +283,30 @@ def _run_audited(operation: str, func, **context) -> str:
             operation=operation, target_path=target_path, before=before,
             after=snapshot_path(target_path), operation_status=status, error=error,
         )
+        receipt = build_mutation_receipt(
+            record,
+            before_text,
+            snapshot_text(target_path),
+            context.get("mutation_context") if isinstance(context.get("mutation_context"), dict) else None,
+        )
+        persisted = persist_mutation_receipt(receipt, before_text)
+        if receipt["rollback"]["status"] == "available" and not persisted:
+            receipt["rollback"]["status"] = "unavailable"
+            receipt["markdown"] = receipt["markdown"].replace(
+                "Rollback: available", "Rollback: unavailable"
+            )
+        record["mutation_id"] = receipt["mutation_id"]
+        record["fact_id_scheme"] = receipt["fact_id_scheme"]
+        record["semantic_fact_ids"] = receipt["semantic_fact_ids"]
+        record["source_identity"] = receipt["source_identity"]
     else:
         record = build_audit_record(
             operation=operation, target_path=target_path,
             before=snapshot_path(target_path), operation_status=status, error=error,
         )
-    write_audit_record(record)
-    return result
+    if audited:
+        write_audit_record(record)
+    return attach_mutation_receipt(result, receipt) if is_mutation else result
 
 
 def _run_audited_batch(operation: str, func, context: dict) -> str:
@@ -387,6 +412,7 @@ def vault_write(
     merge_frontmatter: bool = False,
     overwrite: bool = False,
     expected_sha256: ExpectedSha256 | None = None,
+    mutation: VaultMutationContextInput | None = None,
 ) -> str:
     """Write a file to the vault."""
     inp = VaultWriteInput(
@@ -408,6 +434,7 @@ def vault_write(
             inp.expected_sha256,
         ),
         path=inp.path,
+        mutation_context=mutation.model_dump(exclude_none=True) if mutation else None,
     )
 
 
@@ -440,7 +467,12 @@ def vault_write_binary(path: str, data: str, media_type: str, overwrite: bool = 
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def vault_edit(path: str, edits: list[VaultEditOperationInput], dry_run: bool = False) -> str:
+def vault_edit(
+    path: str,
+    edits: list[VaultEditOperationInput],
+    dry_run: bool = False,
+    mutation: VaultMutationContextInput | None = None,
+) -> str:
     """Patch a file with exact text replacements."""
     inp = VaultEditInput(path=path, edits=edits, dry_run=dry_run)
     if inp.dry_run:
@@ -450,6 +482,7 @@ def vault_edit(path: str, edits: list[VaultEditOperationInput], dry_run: bool = 
         "vault_edit",
         lambda: _vault_edit(inp.path, [edit.model_dump() for edit in inp.edits], inp.dry_run),
         path=inp.path,
+        mutation_context=mutation.model_dump(exclude_none=True) if mutation else None,
     )
 
 
@@ -461,13 +494,20 @@ def vault_edit(path: str, edits: list[VaultEditOperationInput], dry_run: bool = 
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def vault_append(path: str, content: str, separator: str = "\n\n", create_dirs: bool = True) -> str:
+def vault_append(
+    path: str,
+    content: str,
+    separator: str = "\n\n",
+    create_dirs: bool = True,
+    mutation: VaultMutationContextInput | None = None,
+) -> str:
     """Append content to a file."""
     inp = VaultAppendInput(path=path, content=content, separator=separator, create_dirs=create_dirs)
     return _run_audited(
         "vault_append",
         lambda: _vault_append(inp.path, inp.content, inp.separator, inp.create_dirs),
         path=inp.path,
+        mutation_context=mutation.model_dump(exclude_none=True) if mutation else None,
     )
 
 
