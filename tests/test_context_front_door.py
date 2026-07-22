@@ -34,6 +34,11 @@ def _seed_context_fixture(vault: Path) -> None:
         "00-system/guides/00-vault-operating-model.md",
         "# Operating model\nBootstrap before selecting context.\n",
     )
+    _write(
+        vault,
+        "04-areas/README.md",
+        "# Areas\nResolve entity, then Area, then capability from each Area hub.\n",
+    )
     _write(vault, ".agents/skills/lifeos/SKILL.md", "# Life OS skill\nRead-only policy helper.\n")
     _write(vault, ".agents/THIRD_PARTY_NOTICES.md", "# Notices\nSynthetic fixture.\n")
     _write(vault, ".agents/runtime.json", '{"secret": "blocked"}')
@@ -71,6 +76,19 @@ def _seed_context_fixture(vault: Path) -> None:
     )
     _write(vault, "04-areas/periodic/daily/2026-07-19.md", "# Daily\nToday fixture.\n")
     _write(vault, "04-areas/periodic/daily/2026-07-20.md", "# Daily\nTomorrow fixture.\n")
+    _write(
+        vault,
+        "04-areas/italian-ai/ai-hub.md",
+        "---\ntype: area-hub\nuid: area-italian-ai\narea: AI Quotidiana\n"
+        "area_type: creator-media\naliases: [AI Terra Terra, Divulgazione AI]\n---\n"
+        "# AI Quotidiana\n## Capability map\n"
+        "- **Identity & Offer:** [[04-areas/italian-ai/brand/foundation|Brand foundation]]\n"
+        "- **Content System:** [[04-areas/italian-ai/content/system|Content system]]\n"
+        "- **Operations & Decisions:** [[04-areas/italian-ai/operations/decisions|Decisions]]\n",
+    )
+    _write(vault, "04-areas/italian-ai/brand/foundation.md", "# Brand foundation\nPlain AI.\n")
+    _write(vault, "04-areas/italian-ai/content/system.md", "# Content system\nShort videos.\n")
+    _write(vault, "04-areas/italian-ai/operations/decisions.md", "# Decisions\nCurrent.\n")
     clear_bootstrap_cache()
 
 
@@ -131,6 +149,7 @@ def test_bootstrap_is_hash_bound_cached_and_degrades_when_missing(vault_dir):
     assert {item["path"] for item in first["files"]} == {
         "AGENTS.md",
         "00-system/guides/00-vault-operating-model.md",
+        "04-areas/README.md",
     }
     assert all(len(item["sha256"]) == 64 for item in first["files"])
 
@@ -181,6 +200,33 @@ def test_family_route_receipt_proposal_only_and_safety_handoff(vault_dir):
     assert safety["safety"]["handoff"] is True
     assert safety["proposals"] == []
     assert safety["write_executed"] is False
+
+
+def test_business_route_discovers_renamed_area_and_capability_from_hub(vault_dir):
+    _seed_context_fixture(vault_dir)
+    server.frontmatter_index.rebuild()
+
+    brand = _json(server.vault_context_route("Aggiorna il brand di Divulgazione AI"))
+    receipt = brand["receipt"]
+    assert receipt["intent"] == "business_or_project_context"
+    assert receipt["area"] == {
+        "uid": "area-italian-ai",
+        "name": "AI Quotidiana",
+        "hub_path": "04-areas/italian-ai/ai-hub.md",
+        "matched_alias": "Divulgazione AI",
+    }
+    assert receipt["capability"] == "identity_offer"
+    assert receipt["selected_paths"] == [
+        "04-areas/README.md",
+        "04-areas/italian-ai/ai-hub.md",
+        "04-areas/italian-ai/brand/foundation.md",
+    ]
+    assert receipt["missing"] == []
+
+    content = _json(server.vault_context_route("Idea contenuto per AI Terra Terra"))
+    assert content["receipt"]["area"]["uid"] == "area-italian-ai"
+    assert content["receipt"]["capability"] == "content_system"
+    assert "04-areas/italian-ai/content/system.md" in content["receipt"]["selected_paths"]
 
 
 def test_context_reads_are_mode_and_budget_bounded(vault_dir):

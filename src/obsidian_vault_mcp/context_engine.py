@@ -8,8 +8,8 @@ bounded excerpts; bootstrap policy bodies stay server-side.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
+import unicodedata
 from datetime import date as Date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ ROME = ZoneInfo("Europe/Rome")
 BOOTSTRAP_PATHS = (
     "AGENTS.md",
     "00-system/guides/00-vault-operating-model.md",
+    "04-areas/README.md",
 )
 FAMILY_PATHS = (
     "06-life/index.md",
@@ -72,6 +73,153 @@ _bootstrap_cache_key: tuple | None = None
 _bootstrap_cache_value: dict[str, Any] | None = None
 
 
+def _normalized(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    ascii_like = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return " ".join(re.findall(r"[\w]+", ascii_like))
+
+
+def _metadata_values(metadata: dict[str, Any], *fields: str) -> list[str]:
+    values: list[str] = []
+    for field in fields:
+        raw = metadata.get(field)
+        if isinstance(raw, list):
+            values.extend(str(item).strip() for item in raw if str(item).strip())
+        elif raw is not None and str(raw).strip():
+            values.append(str(raw).strip())
+    return list(dict.fromkeys(values))
+
+
+def _resolve_named_entity(
+    request: str,
+    index,
+    *,
+    path_prefix: str,
+    type_value: str,
+    name_fields: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """Resolve a named vault entity from indexed metadata without slug rules."""
+    request_normalized = _normalized(request)
+    request_words = set(request_normalized.split())
+    matches: list[dict[str, Any]] = []
+    for item in index.search_by_field(
+        "type", type_value, "exact", path_prefix=path_prefix, include_archives=False
+    ):
+        metadata = item["frontmatter"]
+        names = _metadata_values(metadata, *name_fields)
+        best: tuple[int, str] | None = None
+        for name in names:
+            normalized_name = _normalized(name)
+            if not normalized_name:
+                continue
+            name_words = normalized_name.split()
+            if f" {normalized_name} " in f" {request_normalized} ":
+                score = 1000 + len(normalized_name)
+            elif (
+                name_words
+                and name_words[0] in request_words
+                and len(name_words[0]) >= 3
+            ):
+                score = 100 + len(name_words[0])
+            else:
+                continue
+            if best is None or score > best[0]:
+                best = (score, name)
+        if best is not None:
+            matches.append(
+                {
+                    "path": item["path"],
+                    "metadata": metadata,
+                    "matched_name": best[1],
+                    "score": best[0],
+                }
+            )
+    if not matches:
+        return None
+    top_score = max(item["score"] for item in matches)
+    top = [item for item in matches if item["score"] == top_score]
+    if len(top) != 1:
+        return {
+            "status": "ambiguous",
+            "candidates": [
+                {
+                    "uid": str(item["metadata"].get("uid", "")),
+                    "name": str(
+                        item["metadata"].get(name_fields[0], item["matched_name"])
+                    ),
+                    "path": item["path"],
+                }
+                for item in sorted(top, key=lambda candidate: candidate["path"])
+            ],
+        }
+    item = top[0]
+    return {
+        "status": "resolved",
+        "uid": str(item["metadata"].get("uid", "")),
+        "name": str(item["metadata"].get(name_fields[0], item["matched_name"])),
+        "path": item["path"],
+        "matched_name": item["matched_name"],
+    }
+
+
+def _resolve_person(request: str, index) -> dict[str, Any] | None:
+    return _resolve_named_entity(
+        request,
+        index,
+        path_prefix="06-life/people/",
+        type_value="life-person",
+        name_fields=("title", "name", "aliases"),
+    )
+
+
+def _resolve_area(request: str, index) -> dict[str, Any] | None:
+    return _resolve_named_entity(
+        request,
+        index,
+        path_prefix="04-areas/",
+        type_value="area-hub",
+        name_fields=("area", "title", "aliases"),
+    )
+
+
+def _capability_for_request(request: str) -> str:
+    lowered = _normalized(request)
+    if any(
+        term in lowered
+        for term in ("brand", "identita", "identity", "offerta", "offer")
+    ):
+        return "identity_offer"
+    if any(
+        term in lowered
+        for term in ("contenuto", "content", "video", "post", "editoriale")
+    ):
+        return "content_system"
+    return "operations_decisions"
+
+
+def _area_capability_path(hub_path: str, request: str) -> tuple[str, str | None]:
+    capability = _capability_for_request(request)
+    try:
+        content, _ = read_file(hub_path)
+    except (FileNotFoundError, ValueError):
+        return capability, None
+    terms = {
+        "identity_offer": ("identity", "brand", "offer", "offerta", "identita"),
+        "content_system": ("content", "contenuto", "editorial"),
+        "operations_decisions": ("operation", "decision", "process", "operativ"),
+    }[capability]
+    for raw in re.findall(r"\[\[([^\]]+)\]\]", content):
+        target, _, label = raw.partition("|")
+        haystack = _normalized(f"{target} {label}")
+        if any(term in haystack for term in terms):
+            clean = target.split("#", 1)[0].strip()
+            if clean:
+                return capability, clean if clean.lower().endswith(
+                    ".md"
+                ) else f"{clean}.md"
+    return capability, None
+
+
 def clear_bootstrap_cache() -> None:
     global _bootstrap_cache_key, _bootstrap_cache_value
     _bootstrap_cache_key = None
@@ -107,14 +255,16 @@ def _load_bootstrap() -> tuple[dict[str, Any], bool]:
             files.append({"path": rel, "status": "missing"})
             policy_material.append(f"{rel}:missing")
             continue
-        files.append({
-            "path": rel,
-            "status": "ready",
-            "sha256": metadata["sha256"],
-            "size": metadata["size"],
-            "modified": metadata["modified"],
-            "content": content,
-        })
+        files.append(
+            {
+                "path": rel,
+                "status": "ready",
+                "sha256": metadata["sha256"],
+                "size": metadata["size"],
+                "modified": metadata["modified"],
+                "content": content,
+            }
+        )
         policy_material.append(f"{rel}:{metadata['sha256']}")
 
     policy_hash = hashlib.sha256("\n".join(policy_material).encode("utf-8")).hexdigest()
@@ -135,7 +285,9 @@ def bootstrap_status() -> dict[str, Any]:
     return {
         "status": data["status"],
         "policy_hash": data["policy_hash"],
-        "files": [{k: v for k, v in item.items() if k != "content"} for item in data["files"]],
+        "files": [
+            {k: v for k, v in item.items() if k != "content"} for item in data["files"]
+        ],
         "missing": list(data["missing"]),
         "cached": cached,
     }
@@ -161,9 +313,17 @@ def _date_range(
     end = _parse_date(end_date, "end_date")
     lowered = request.casefold()
     if start is None:
-        start = today + timedelta(days=1) if any(x in lowered for x in ("domani", "tomorrow")) else today
+        start = (
+            today + timedelta(days=1)
+            if any(x in lowered for x in ("domani", "tomorrow"))
+            else today
+        )
     if end is None:
-        end = start + timedelta(days=6) if any(x in lowered for x in ("questa settimana", "this week")) else start
+        end = (
+            start + timedelta(days=6)
+            if any(x in lowered for x in ("questa settimana", "this week"))
+            else start
+        )
     if end < start:
         raise ValueError("end_date must not be before start_date")
     if (end - start).days > 31:
@@ -174,21 +334,41 @@ def _date_range(
 def _classify(request: str) -> tuple[str, list[str], str | None]:
     lowered = request.casefold()
     if any(term in lowered for term in SAFETY_TERMS):
-        return "safety_handoff", ["mental_health_sensitive", "immediate_safety"], "mental_health_sensitive"
+        return (
+            "safety_handoff",
+            ["mental_health_sensitive", "immediate_safety"],
+            "mental_health_sensitive",
+        )
     if any(term in lowered for term in FAMILY_TERMS):
-        risk = "mental_health_sensitive" if any(term in lowered for term in MENTAL_HEALTH_TERMS) else "personal_sensitive"
+        risk = (
+            "mental_health_sensitive"
+            if any(term in lowered for term in MENTAL_HEALTH_TERMS)
+            else "personal_sensitive"
+        )
         secondary = ["family_relationship_change", "personal_support_plan"]
         if risk == "mental_health_sensitive":
             secondary.append("mental_health_sensitive")
         return "personal_family_mental_health_change", secondary, risk
-    if any(term in lowered for term in ("salute", "stanco", "sonno", "ginocchio", "energia")):
-        return "personal_health_recent_state", ["recent_daily_context"], "health_sensitive"
-    if any(term in lowered for term in ("tnd", "aiconic", "creator spagnolo", "business", "azienda")):
+    if any(
+        term in lowered
+        for term in ("salute", "stanco", "sonno", "ginocchio", "energia")
+    ):
+        return (
+            "personal_health_recent_state",
+            ["recent_daily_context"],
+            "health_sensitive",
+        )
+    if any(
+        term in lowered
+        for term in ("tnd", "aiconic", "creator spagnolo", "business", "azienda")
+    ):
         return "business_or_project_context", ["project_canon"], None
     return "general_life_context", ["general_recall"], None
 
 
-def _paths_for_intent(intent: str, request: str, dates: dict[str, str]) -> list[dict[str, str]]:
+def _paths_for_intent(
+    intent: str, request: str, dates: dict[str, str]
+) -> list[dict[str, str]]:
     if intent == "personal_family_mental_health_change":
         paths = [
             {
@@ -202,36 +382,152 @@ def _paths_for_intent(intent: str, request: str, dates: dict[str, str]) -> list[
         lowered = request.casefold()
         for terms, path, reason in (
             (("abitudine", "routine"), "06-life/habits.md", "habit change requested"),
-            (("allenamento", "fitness", "sport"), "06-life/fitness.md", "fitness context requested"),
-            (("soldi", "budget", "spesa"), "06-life/money.md", "money context requested"),
-            (("input", "cattura", "capture"), "01-input/index.md", "input gate requested"),
+            (
+                ("allenamento", "fitness", "sport"),
+                "06-life/fitness.md",
+                "fitness context requested",
+            ),
+            (
+                ("soldi", "budget", "spesa"),
+                "06-life/money.md",
+                "money context requested",
+            ),
+            (
+                ("input", "cattura", "capture"),
+                "01-input/index.md",
+                "input gate requested",
+            ),
         ):
             if any(term in lowered for term in terms):
-                paths.append({
-                    "path": path,
-                    "requirement": "conditional",
-                    "mode": "sections",
-                    "reason": reason,
-                })
+                paths.append(
+                    {
+                        "path": path,
+                        "requirement": "conditional",
+                        "mode": "sections",
+                        "reason": reason,
+                    }
+                )
         return paths
     if intent == "personal_health_recent_state":
         return [
-            {"path": "06-life/index.md", "requirement": "required", "mode": "metadata", "reason": "life canon"},
-            {"path": "06-life/health.md", "requirement": "required", "mode": "sections", "reason": "health canon"},
+            {
+                "path": "06-life/index.md",
+                "requirement": "required",
+                "mode": "metadata",
+                "reason": "life canon",
+            },
+            {
+                "path": "06-life/health.md",
+                "requirement": "required",
+                "mode": "sections",
+                "reason": "health canon",
+            },
         ]
     if intent == "business_or_project_context":
         lowered = request.casefold()
         slug = "tnd" if "tnd" in lowered else "aiconic" if "aiconic" in lowered else ""
-        paths = [{"path": "04-areas/index.md", "requirement": "required", "mode": "metadata", "reason": "area index"}]
+        paths = [
+            {
+                "path": "04-areas/index.md",
+                "requirement": "required",
+                "mode": "metadata",
+                "reason": "area index",
+            }
+        ]
         if slug:
-            paths.append({"path": f"04-areas/{slug}/index.md", "requirement": "conditional", "mode": "sections", "reason": "named area"})
+            paths.append(
+                {
+                    "path": f"04-areas/{slug}/index.md",
+                    "requirement": "conditional",
+                    "mode": "sections",
+                    "reason": "named area",
+                }
+            )
         return paths
     if intent == "safety_handoff":
         return []
     return [
-        {"path": "06-life/index.md", "requirement": "required", "mode": "metadata", "reason": "life canon"},
-        {"path": "06-life/profile.md", "requirement": "conditional", "mode": "metadata", "reason": "personal context"},
+        {
+            "path": "06-life/index.md",
+            "requirement": "required",
+            "mode": "metadata",
+            "reason": "life canon",
+        },
+        {
+            "path": "06-life/profile.md",
+            "requirement": "conditional",
+            "mode": "metadata",
+            "reason": "personal context",
+        },
     ]
+
+
+def _person_paths(entity: dict[str, Any]) -> list[dict[str, str]]:
+    paths = [
+        {
+            "path": "06-life/people/index.md",
+            "requirement": "required",
+            "mode": "metadata",
+            "reason": "people canon index",
+        }
+    ]
+    if entity["status"] == "resolved":
+        paths.append(
+            {
+                "path": entity["path"],
+                "requirement": "required",
+                "mode": "sections",
+                "reason": "resolved person canonical note",
+            }
+        )
+        paths.extend(
+            {
+                "path": path,
+                "requirement": "conditional",
+                "mode": "sections",
+                "reason": "person-related life canon",
+            }
+            for path in (
+                "06-life/relationships-and-friends.md",
+                "06-life/story.md",
+                "06-life/dreams.md",
+            )
+        )
+    return paths
+
+
+def _area_paths(
+    entity: dict[str, Any], request: str
+) -> tuple[list[dict[str, str]], str]:
+    capability = _capability_for_request(request)
+    paths = [
+        {
+            "path": "04-areas/README.md",
+            "requirement": "required",
+            "mode": "metadata",
+            "reason": "area routing contract",
+        }
+    ]
+    if entity["status"] == "resolved":
+        paths.append(
+            {
+                "path": entity["path"],
+                "requirement": "required",
+                "mode": "sections",
+                "reason": "resolved Area hub",
+            }
+        )
+        capability, capability_path = _area_capability_path(entity["path"], request)
+        if capability_path:
+            paths.append(
+                {
+                    "path": capability_path,
+                    "requirement": "conditional",
+                    "mode": "sections",
+                    "reason": f"hub-owned capability: {capability}",
+                }
+            )
+    return paths, capability
 
 
 def _wikilinks(content: str) -> list[str]:
@@ -258,7 +554,9 @@ def _link_candidates(target: str) -> list[str]:
                 continue
             if any(part in config.EXCLUDED_DIRS for part in Path(rel).parts):
                 continue
-            if any(part.startswith(".") for part in Path(rel).parts) and not is_hidden_read_allowed(rel):
+            if any(
+                part.startswith(".") for part in Path(rel).parts
+            ) and not is_hidden_read_allowed(rel):
                 continue
             candidates.append(rel)
             if len(candidates) >= 20:
@@ -290,14 +588,16 @@ def _check_links(selected_paths: list[str]) -> tuple[list[dict[str, Any]], list[
             else:
                 status = "broken"
                 missing.append(target)
-            checks.append({
-                "source": source,
-                "target": target,
-                "status": status,
-                "canonical_candidates": canonical,
-                "archive_candidates": archived,
-                "followed": status == "canonical",
-            })
+            checks.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "status": status,
+                    "canonical_candidates": canonical,
+                    "archive_candidates": archived,
+                    "followed": status == "canonical",
+                }
+            )
     return checks, missing
 
 
@@ -316,13 +616,23 @@ def _duplicate_uids(paths: list[str], index) -> list[dict[str, Any]]:
         matches = index.search_by_field("uid", str(uid), "exact", include_archives=True)
         if len(matches) > 1:
             candidates = sorted(item["path"] for item in matches)
-            canonical = [candidate for candidate in candidates if not is_archive_path(candidate)]
-            duplicates.append({
-                "uid": str(uid),
-                "selected": path if path in canonical else (canonical[0] if canonical else None),
-                "candidates": candidates,
-                "archive_skipped": [candidate for candidate in candidates if is_archive_path(candidate)],
-            })
+            canonical = [
+                candidate for candidate in candidates if not is_archive_path(candidate)
+            ]
+            duplicates.append(
+                {
+                    "uid": str(uid),
+                    "selected": path
+                    if path in canonical
+                    else (canonical[0] if canonical else None),
+                    "candidates": candidates,
+                    "archive_skipped": [
+                        candidate
+                        for candidate in candidates
+                        if is_archive_path(candidate)
+                    ],
+                }
+            )
     return duplicates
 
 
@@ -339,9 +649,26 @@ def route_context(
     if not request.strip():
         raise ValueError("request must not be empty")
     bootstrap = bootstrap_status()
-    intent, secondary, risk = _classify(request)
+    person = _resolve_person(request, index)
+    area = _resolve_area(request, index)
+    if person is not None:
+        intent = "personal_person_context"
+        secondary = ["entity_resolution", "personal_recall"]
+        risk = "personal_sensitive"
+    elif area is not None:
+        intent = "business_or_project_context"
+        secondary = ["area_resolution", "project_canon"]
+        risk = None
+    else:
+        intent, secondary, risk = _classify(request)
     dates = _date_range(request, reference_date, start_date, end_date)
-    requested = _paths_for_intent(intent, request, dates)
+    capability = None
+    if person is not None:
+        requested = _person_paths(person)
+    elif area is not None:
+        requested, capability = _area_paths(area, request)
+    else:
+        requested = _paths_for_intent(intent, request, dates)
     selected = []
     missing = []
     skipped = []
@@ -364,32 +691,51 @@ def route_context(
             for path in duplicate["archive_skipped"]
         )
     archive_policy = archive_policy_receipt(include_archives)
-    return {
-        "receipt": {
-            "intent": intent,
-            "secondary_intents": secondary,
-            "risk_domain": risk,
-            "timezone": "Europe/Rome",
-            "date_range": dates,
-            "write_mode": "proposal_only" if risk else "read_only",
-            "required": [item["path"] for item in requested if item["requirement"] == "required"],
-            "selected": selected,
-            "selected_paths": selected_paths,
-            "missing": missing,
-            "skipped": skipped,
-            "duplicates": duplicates,
-            "archive_decisions": archive_policy,
-            "link_checks": link_checks,
-            "policy_status": bootstrap["status"],
-            "policy_hash": bootstrap["policy_hash"],
-            "index_hash": index.snapshot_hash(),
-            "safety_handoff": intent == "safety_handoff",
-        }
+    receipt = {
+        "intent": intent,
+        "secondary_intents": secondary,
+        "risk_domain": risk,
+        "timezone": "Europe/Rome",
+        "date_range": dates,
+        "write_mode": "proposal_only" if risk else "read_only",
+        "required": [
+            item["path"] for item in requested if item["requirement"] == "required"
+        ],
+        "selected": selected,
+        "selected_paths": selected_paths,
+        "missing": missing,
+        "skipped": skipped,
+        "duplicates": duplicates,
+        "archive_decisions": archive_policy,
+        "link_checks": link_checks,
+        "policy_status": bootstrap["status"],
+        "policy_hash": bootstrap["policy_hash"],
+        "index_hash": index.snapshot_hash(),
+        "safety_handoff": intent == "safety_handoff",
     }
+    if person is not None:
+        receipt["entity_resolution"] = person
+    if area is not None:
+        receipt["area_resolution"] = {"status": area["status"]}
+        if area["status"] == "resolved":
+            receipt["area"] = {
+                "uid": area["uid"],
+                "name": area["name"],
+                "hub_path": area["path"],
+                "matched_alias": area["matched_name"],
+            }
+        else:
+            receipt["area_resolution"]["candidates"] = area["candidates"]
+        receipt["capability"] = capability
+    return {"receipt": receipt}
 
 
 def _keywords(request: str) -> list[str]:
-    return [word for word in re.findall(r"[\wàèéìòù]+", request.casefold()) if len(word) >= 5][:20]
+    return [
+        word
+        for word in re.findall(r"[\wàèéìòù]+", request.casefold())
+        if len(word) >= 5
+    ][:20]
 
 
 def _snippet(content: str, request: str, limit: int) -> str:
@@ -398,7 +744,7 @@ def _snippet(content: str, request: str, limit: int) -> str:
     chosen = []
     for index, line in enumerate(lines):
         if any(word in line.casefold() for word in words):
-            chosen.extend(lines[max(0, index - 1): min(len(lines), index + 2)])
+            chosen.extend(lines[max(0, index - 1) : min(len(lines), index + 2)])
         if len("\n".join(chosen)) >= limit:
             break
     return ("\n".join(dict.fromkeys(chosen)) or content[:limit])[:limit]
@@ -469,16 +815,18 @@ def read_context(
             item["content"] = body
         files.append(item)
         chars += len(body)
-    receipt.update({
-        "read_mode": mode,
-        "declared_budgets": {
-            "max_files": max_files,
-            "max_chars_per_file": max_chars_per_file,
-            "total_chars": total_chars,
-        },
-        "files_returned": len(files),
-        "chars_returned": chars,
-    })
+    receipt.update(
+        {
+            "read_mode": mode,
+            "declared_budgets": {
+                "max_files": max_files,
+                "max_chars_per_file": max_chars_per_file,
+                "total_chars": total_chars,
+            },
+            "files_returned": len(files),
+            "chars_returned": chars,
+        }
+    )
     return {"files": files, "receipt": receipt}
 
 
@@ -518,16 +866,47 @@ def propose_context(
             "receipt": receipt,
         }
     proposals = []
-    if receipt["intent"] == "personal_family_mental_health_change":
+    if receipt["intent"] == "personal_person_context":
+        entity = receipt["entity_resolution"]
+        if entity["status"] == "resolved":
+            _, person_metadata = read_file(entity["path"])
+            _, index_metadata = read_file("06-life/people/index.md")
+            proposals = [
+                {
+                    "operation": "targeted_update",
+                    "path": entity["path"],
+                    "scope": "source-bound person facts only",
+                    "expected_sha256": person_metadata["sha256"],
+                },
+                {
+                    "operation": "targeted_update",
+                    "path": "06-life/people/index.md",
+                    "scope": "canonical people index link only",
+                    "expected_sha256": index_metadata["sha256"],
+                },
+            ]
+    elif receipt["intent"] == "personal_family_mental_health_change":
         person_path = (
             "06-life/people/sorella.md"
             if "sorella" in request.casefold()
             else "06-life/people/persona-familiare.md"
         )
         proposals = [
-            {"operation": "create_if_missing", "path": person_path, "scope": "relationship facts and support preferences only"},
-            {"operation": "targeted_update", "path": "06-life/people/index.md", "scope": "canonical people index link"},
-            {"operation": "targeted_update", "path": "04-areas/family-relations.md", "scope": "family hub canonical link"},
+            {
+                "operation": "create_if_missing",
+                "path": person_path,
+                "scope": "relationship facts and support preferences only",
+            },
+            {
+                "operation": "targeted_update",
+                "path": "06-life/people/index.md",
+                "scope": "canonical people index link",
+            },
+            {
+                "operation": "targeted_update",
+                "path": "04-areas/family-relations.md",
+                "scope": "family hub canonical link",
+            },
         ]
     return {
         "write_mode": "proposal_only",
