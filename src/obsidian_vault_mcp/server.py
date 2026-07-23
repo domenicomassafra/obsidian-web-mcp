@@ -15,6 +15,7 @@ import time
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -188,6 +189,7 @@ from .models import (
     VaultEditInput,
     VaultAppendInput,
     VaultMutationContextInput,
+    VaultWritePreflightInput,
     VaultBatchReadInput,
     FrontmatterUpdateInput,
     VaultBatchFrontmatterUpdateInput,
@@ -209,6 +211,188 @@ from .models import (
 )
 
 
+_PREFLIGHT_REQUIRED_OPERATIONS = frozenset({
+    "vault_write",
+    "vault_edit",
+    "vault_append",
+    "vault_move",
+    "vault_delete",
+})
+_INDEX_NAMES = frozenset({"readme.md", "index.md"})
+_ATOMIC_MARKERS = (
+    "storyboard",
+    "produzione",
+    "production",
+    "research",
+    "ricerca",
+    "lifecycle",
+    "format",
+    "scaletta",
+    "script",
+    "review cycle",
+    "episodio",
+    "episode",
+    "serie",
+    "series",
+)
+
+
+def _is_index_path(path: str) -> bool:
+    name = PurePosixPath(path).name.lower()
+    return name in _INDEX_NAMES or name.endswith("-hub.md")
+
+
+def _requires_atomic_note(content: str) -> bool:
+    body = content.strip()
+    heading_count = sum(1 for line in body.splitlines() if line.lstrip().startswith("#"))
+    lowered = body.casefold()
+    return (
+        len(body) > 240
+        or heading_count >= 2
+        or any(marker in lowered for marker in _ATOMIC_MARKERS)
+    )
+
+
+def _preflight_block(operation: str, plan: dict | None, errors: list[str]) -> str:
+    """Return a bounded no-write receipt that exposes the correction needed."""
+    return dumps({
+        "error": "write_preflight_blocked",
+        "status": "blocked",
+        "write_executed": False,
+        "operation": operation,
+        "errors": list(dict.fromkeys(errors)),
+        "write_preflight_receipt": {
+            "schema": "obsidian-write-preflight/v1",
+            "status": "blocked",
+            "path": (plan or {}).get("canonical_destination"),
+            "operation": (plan or {}).get("operation"),
+            "reason": (plan or {}).get("reason"),
+            "preimage_requirement": (plan or {}).get("preimage_requirement"),
+            "rollback_target": (plan or {}).get("rollback_target"),
+        },
+    })
+
+
+def _validate_write_preflight(operation: str, context: dict) -> tuple[dict | None, list[str]]:
+    """Validate the model's plan against the real path and preimage at the write gate."""
+    mutation = context.get("mutation_context")
+    if not isinstance(mutation, dict):
+        return None, ["mutation.preflight is required before every public vault mutation"]
+    raw_plan = mutation.get("preflight")
+    if not isinstance(raw_plan, dict):
+        return None, ["mutation.preflight is required before every public vault mutation"]
+    try:
+        plan = VaultWritePreflightInput.model_validate(raw_plan).model_dump(exclude_none=True)
+    except Exception as exc:
+        return raw_plan, [f"invalid structured preflight: {exc}"]
+
+    errors: list[str] = []
+    canonical = plan["canonical_destination"].strip("/")
+    candidates = [candidate.strip("/") for candidate in plan["candidate_destinations"]]
+    entity_area = plan["entity_area"].strip("/")
+    source = str(context.get("source") or "").strip("/")
+    actual_path = str(context.get("destination") or context.get("path") or source).strip("/")
+    content = str(context.get("proposed_content") or "")
+
+    for value, label in ((canonical, "canonical_destination"), (entity_area, "entity_area"), (actual_path, "path")):
+        parts = PurePosixPath(value).parts
+        if not value or value.startswith("/") or ".." in parts or "." in parts:
+            errors.append(f"{label} must be a normalized vault-relative path")
+
+    if canonical != actual_path:
+        errors.append("canonical_destination does not match the actual tool path")
+    if len(candidates) != 1 or candidates[0] != canonical:
+        errors.append("destination is ambiguous; exactly one canonical candidate is required")
+    if not (canonical == entity_area or canonical.startswith(f"{entity_area}/")):
+        errors.append("canonical_destination is outside the resolved entity/Area owner")
+    if plan["confidence"] < 0.80:
+        errors.append("confidence below 0.80; resolve context or ask one question before writing")
+
+    parts = PurePosixPath(canonical).parts
+    root = parts[0] if parts else ""
+    capability = plan["capability"]
+    allowed_roots = {
+        "capture": {"01-input"},
+        "business": {"04-areas"},
+        "brand": {"04-areas"},
+        "content": {"04-areas"},
+        "operations": {"04-areas"},
+        "knowledge": {"05-knowledge"},
+        "research": {"05-knowledge"},
+        "life": {"06-life"},
+        "people": {"06-life"},
+        "media": {"04-areas", "05-knowledge"},
+    }
+    if capability in {"task", "self-improvement"}:
+        owner = "Notion task owner" if capability == "task" else "proposal-only owner scope"
+        errors.append(f"{capability} cannot mutate Obsidian through this gateway; route to {owner}")
+    elif root not in allowed_roots.get(capability, set()):
+        errors.append(f"capability '{capability}' does not own destination root '{root}'")
+    if root == "04-areas" and len(PurePosixPath(entity_area).parts) != 2:
+        errors.append("business/creator writes require an exact current Area root: 04-areas/<slug>")
+    if capability == "people" and not entity_area.startswith("06-life/people"):
+        errors.append("people content must resolve to the People owner under 06-life")
+    if capability == "media" and not plan.get("provenance"):
+        errors.append("media writes require provenance (source URL, receipt, or SHA-256 identity)")
+
+    before_path = source if operation == "vault_move" else actual_path
+    before = snapshot_path(before_path)
+    before_checksum = before.get("checksum")
+    destination_exists = snapshot_path(actual_path).get("checksum") is not None
+    expected_operation = {
+        "vault_write": "update" if destination_exists else "create",
+        "vault_edit": "update",
+        "vault_append": "append",
+        "vault_move": "move",
+        "vault_delete": "delete",
+    }[operation]
+    if plan["operation"] != expected_operation:
+        errors.append(f"operation must be '{expected_operation}' for the current target state")
+    if expected_operation in {"append", "update", "delete", "move"} and before_checksum is None:
+        errors.append("required preimage does not exist")
+    if expected_operation in {"create", "move"} and destination_exists:
+        errors.append("destination already exists; no-overwrite preflight failed")
+
+    expected_preimage = "absent" if expected_operation == "create" else (
+        f"sha256:{before_checksum}" if before_checksum else "sha256:<missing>"
+    )
+    if plan["preimage_requirement"] != expected_preimage:
+        errors.append("preimage_requirement does not match the current file SHA-256/state")
+    expected_rollback = {
+        "create": f"delete-if-postimage:{canonical}",
+        "append": f"restore-preimage:{canonical}",
+        "update": f"restore-preimage:{canonical}",
+        "move": f"move-back:{canonical}->{source}",
+        "delete": f"restore-from-trash:{canonical}",
+    }[expected_operation]
+    if plan["rollback_target"] != expected_rollback:
+        errors.append("rollback_target does not match the exact operation target")
+
+    is_index = _is_index_path(canonical)
+    file_kind = plan["file_kind"]
+    needs_atomic = _requires_atomic_note(content)
+    if is_index and needs_atomic:
+        errors.append("README/index/hub cannot contain an atomic brief; create an atomic note and append only its link")
+    if is_index and file_kind not in {"quick-seed-register", "index-link"}:
+        errors.append("README/index/hub accepts only a quick-seed register entry or an atomic-note link")
+    if file_kind in {"quick-seed-register", "index-link"} and not is_index:
+        errors.append("register/link file_kind requires the resolved existing README/index/hub")
+    if file_kind == "quick-seed-register" and expected_operation != "append":
+        errors.append("a quick seed must append to an existing ordered register")
+    if capability == "content" and not needs_atomic and file_kind == "atomic-note":
+        errors.append("a short content seed without lifecycle must append to the ordered register")
+    if needs_atomic and file_kind != "atomic-note":
+        errors.append("brief/lifecycle content requires file_kind atomic-note")
+    if file_kind == "atomic-note" and is_index:
+        errors.append("atomic-note cannot target README/index/hub")
+    if operation == "vault_write":
+        supplied_expected = context.get("expected_sha256")
+        if expected_operation == "update" and supplied_expected != before_checksum:
+            errors.append("expected_sha256 must match the validated preimage")
+
+    return plan, list(dict.fromkeys(errors))
+
+
 def _parse_tool_result(result: str) -> dict:
     """Parse a tool's JSON result into a dict, or {} when it is not a JSON object."""
     try:
@@ -228,6 +412,11 @@ def _run_audited(operation: str, func, **context) -> str:
     audit-write failure is swallowed inside write_audit_record so the trail can never break
     the tool result.
     """
+    if operation in _PREFLIGHT_REQUIRED_OPERATIONS:
+        plan, errors = _validate_write_preflight(operation, context)
+        if errors:
+            return _preflight_block(operation, plan, errors)
+
     rate_limit = check_tool_rate_limit(operation)
     if rate_limit is not None:
         result = json.dumps({
@@ -404,18 +593,19 @@ def vault_batch_read(
     description=(
         "Create a file in the Obsidian vault without clobbering an existing note by default. "
         "Every replacement requires expected_sha256; overwrite=true never bypasses the "
-        "version check. Supports frontmatter merging."
+        "version check. mutation.preflight is mandatory and is validated against the real "
+        "owner, destination, file kind, preimage and rollback target. Supports frontmatter merging."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
 def vault_write(
     path: str,
     content: str,
+    mutation: VaultMutationContextInput,
     create_dirs: bool = True,
     merge_frontmatter: bool = False,
     overwrite: bool = False,
     expected_sha256: ExpectedSha256 | None = None,
-    mutation: VaultMutationContextInput | None = None,
 ) -> str:
     """Write a file to the vault."""
     inp = VaultWriteInput(
@@ -437,7 +627,9 @@ def vault_write(
             inp.expected_sha256,
         ),
         path=inp.path,
-        mutation_context=mutation.model_dump(exclude_none=True) if mutation else None,
+        proposed_content=inp.content,
+        expected_sha256=inp.expected_sha256,
+        mutation_context=mutation.model_dump(exclude_none=True),
     )
 
 
@@ -466,15 +658,16 @@ def vault_write_binary(path: str, data: str, media_type: str, overwrite: bool = 
     name="vault_edit",
     description=(
         "Patch an existing vault file with exact text replacements. Use this for token-efficient partial edits "
-        "when only small fragments change; supports dry-run diff previews and avoids resending the full file."
+        "when only small fragments change; mutation.preflight is mandatory before a real write. "
+        "Supports dry-run diff previews and avoids resending the full file."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
 def vault_edit(
     path: str,
     edits: list[VaultEditOperationInput],
+    mutation: VaultMutationContextInput,
     dry_run: bool = False,
-    mutation: VaultMutationContextInput | None = None,
 ) -> str:
     """Patch a file with exact text replacements."""
     inp = VaultEditInput(path=path, edits=edits, dry_run=dry_run)
@@ -485,7 +678,8 @@ def vault_edit(
         "vault_edit",
         lambda: _vault_edit(inp.path, [edit.model_dump() for edit in inp.edits], inp.dry_run),
         path=inp.path,
-        mutation_context=mutation.model_dump(exclude_none=True) if mutation else None,
+        proposed_content="\n".join(edit.new_text for edit in inp.edits),
+        mutation_context=mutation.model_dump(exclude_none=True),
     )
 
 
@@ -493,16 +687,17 @@ def vault_edit(
     name="vault_append",
     description=(
         "Append content to a vault file without sending the existing file body. Use this for token-efficient "
-        "additions; creates the file when it does not exist."
+        "additions. mutation.preflight is mandatory; quick seeds append to an existing register, "
+        "while briefs must use an atomic note."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
 def vault_append(
     path: str,
     content: str,
+    mutation: VaultMutationContextInput,
     separator: str = "\n\n",
     create_dirs: bool = True,
-    mutation: VaultMutationContextInput | None = None,
 ) -> str:
     """Append content to a file."""
     inp = VaultAppendInput(path=path, content=content, separator=separator, create_dirs=create_dirs)
@@ -510,7 +705,8 @@ def vault_append(
         "vault_append",
         lambda: _vault_append(inp.path, inp.content, inp.separator, inp.create_dirs),
         path=inp.path,
-        mutation_context=mutation.model_dump(exclude_none=True) if mutation else None,
+        proposed_content=inp.content,
+        mutation_context=mutation.model_dump(exclude_none=True),
     )
 
 
@@ -650,10 +846,15 @@ def vault_list(
 
 @mcp.tool(
     name="vault_move",
-    description="Move a file or directory within the vault. Validates both source and destination paths.",
+    description="Move a file or directory within the vault. Requires mutation.preflight and validates both source and destination paths, owner, preimage and rollback target.",
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def vault_move(source: str, destination: str, create_dirs: bool = True) -> str:
+def vault_move(
+    source: str,
+    destination: str,
+    mutation: VaultMutationContextInput,
+    create_dirs: bool = True,
+) -> str:
     """Move a file or directory."""
     inp = VaultMoveInput(source=source, destination=destination, create_dirs=create_dirs)
     return _run_audited(
@@ -661,21 +862,23 @@ def vault_move(source: str, destination: str, create_dirs: bool = True) -> str:
         lambda: _vault_move(inp.source, inp.destination, inp.create_dirs),
         source=inp.source,
         destination=inp.destination,
+        mutation_context=mutation.model_dump(exclude_none=True),
     )
 
 
 @mcp.tool(
     name="vault_delete",
-    description="Delete a file by moving it to .trash/ in the vault root. Requires confirm=true as a safety gate. Does NOT hard delete.",
+    description="Delete a file by moving it to .trash/ in the vault root. Requires mutation.preflight plus confirm=true. Does NOT hard delete.",
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
-def vault_delete(path: str, confirm: bool = False) -> str:
+def vault_delete(path: str, mutation: VaultMutationContextInput, confirm: bool = False) -> str:
     """Delete a file (move to .trash/)."""
     inp = VaultDeleteInput(path=path, confirm=confirm)
     return _run_audited(
         "vault_delete",
         lambda: _vault_delete(inp.path, inp.confirm),
         path=inp.path,
+        mutation_context=mutation.model_dump(exclude_none=True),
     )
 
 

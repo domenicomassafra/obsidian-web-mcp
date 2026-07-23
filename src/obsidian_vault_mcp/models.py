@@ -42,8 +42,64 @@ class VaultMutationSourceInput(BaseModel):
     channel: Literal["chatgpt", "hermes", "nightly", "other"] = "other"
 
 
+class VaultWritePreflightInput(BaseModel):
+    """Model-proposed write plan validated by the MCP immediately before mutation."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    source_input_class: str = Field(..., min_length=1, max_length=120)
+    entity_area: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Canonical owner root, for example 04-areas/<current-area-slug>.",
+    )
+    capability: Literal[
+        "capture",
+        "business",
+        "brand",
+        "content",
+        "operations",
+        "knowledge",
+        "research",
+        "life",
+        "people",
+        "media",
+        "task",
+        "self-improvement",
+    ]
+    canonical_destination: str = Field(..., min_length=1, max_length=500)
+    candidate_destinations: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        ...,
+        min_length=1,
+        max_length=3,
+        description="Resolved destination candidates; exactly one is required to write.",
+    )
+    file_kind: Literal[
+        "quick-seed-register",
+        "index-link",
+        "atomic-note",
+        "person-note",
+        "life-note",
+        "knowledge-note",
+        "media-asset",
+        "move",
+        "delete",
+    ]
+    operation: Literal["append", "create", "update", "move", "delete"]
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    reason: str = Field(..., min_length=1, max_length=500)
+    preimage_requirement: str = Field(..., min_length=1, max_length=160)
+    rollback_target: str = Field(..., min_length=1, max_length=700)
+    provenance: str | None = Field(
+        default=None,
+        max_length=1000,
+        description="Required for media: source URL, source receipt, or source SHA-256 identity.",
+    )
+
+
 class VaultMutationContextInput(BaseModel):
-    """Optional provenance used by the shared mutation receipt contract."""
+    """Required preflight plus optional provenance for the mutation receipt contract."""
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -56,6 +112,7 @@ class VaultMutationContextInput(BaseModel):
         max_length=24,
         description="Canonical fact strings; receipts persist only their normalized SHA-256 identities.",
     )
+    preflight: VaultWritePreflightInput
 
 
 class VaultReadInput(BaseModel):

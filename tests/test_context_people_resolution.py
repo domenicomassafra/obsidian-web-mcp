@@ -8,6 +8,7 @@ from pathlib import Path
 
 from obsidian_vault_mcp import server
 from obsidian_vault_mcp.context_engine import clear_bootstrap_cache
+from obsidian_vault_mcp.models import VaultMutationContextInput
 
 
 def _json(payload: str) -> dict:
@@ -51,6 +52,24 @@ def _seed(vault: Path, *, duplicate_first_name: bool = False) -> str:
     clear_bootstrap_cache()
     server.frontmatter_index.rebuild()
     return (vault / "06-life/people/angela-example.md").read_text(encoding="utf-8")
+
+
+def _person_mutation(path: str, preimage: str) -> VaultMutationContextInput:
+    return VaultMutationContextInput.model_validate({
+        "preflight": {
+            "source_input_class": "person-update",
+            "entity_area": "06-life/people",
+            "capability": "people",
+            "canonical_destination": path,
+            "candidate_destinations": [path],
+            "file_kind": "person-note",
+            "operation": "update",
+            "confidence": 0.99,
+            "reason": "Resolved named person and exact preimage",
+            "preimage_requirement": f"sha256:{preimage}",
+            "rollback_target": f"restore-preimage:{path}",
+        }
+    })
 
 
 def test_three_redacted_followups_keep_the_same_resolved_person(vault_dir):
@@ -118,17 +137,34 @@ def test_person_proposal_is_no_write_and_cas_apply_replay_rollback_are_exact(vau
         "Verified synthetic person fact.\nSource-bound synthetic correction.",
     )
     applied = _json(
-        server.vault_write(path, updated, expected_sha256=target["expected_sha256"])
+        server.vault_write(
+            path,
+            updated,
+            _person_mutation(path, target["expected_sha256"]),
+            expected_sha256=target["expected_sha256"],
+        )
     )
     assert applied["created"] is False
     updated_sha = applied["sha256"]
 
     replay = _json(
-        server.vault_write(path, updated, expected_sha256=target["expected_sha256"])
+        server.vault_write(
+            path,
+            updated,
+            _person_mutation(path, target["expected_sha256"]),
+            expected_sha256=target["expected_sha256"],
+        )
     )
-    assert "changed since it was read" in replay["error"]
+    assert replay["error"] == "write_preflight_blocked"
     assert (vault_dir / path).read_text(encoding="utf-8") == updated
 
-    rolled_back = _json(server.vault_write(path, original, expected_sha256=updated_sha))
+    rolled_back = _json(
+        server.vault_write(
+            path,
+            original,
+            _person_mutation(path, updated_sha),
+            expected_sha256=updated_sha,
+        )
+    )
     assert rolled_back["sha256"] == hashlib.sha256(original.encode()).hexdigest()
     assert (vault_dir / path).read_text(encoding="utf-8") == original

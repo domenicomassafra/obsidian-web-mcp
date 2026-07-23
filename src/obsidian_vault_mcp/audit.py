@@ -233,6 +233,7 @@ def build_mutation_receipt(
 ) -> dict[str, Any]:
     """Build the JSON + bounded Markdown receipt returned by text mutations."""
     mutation_context = mutation_context or {}
+    write_preflight = mutation_context.get("preflight") or {}
     fact_ids = sorted({semantic_fact_id(text) for text in mutation_context.get("semantic_facts") or []})
     source_identity = mutation_context.get("source")
     identity = {
@@ -264,9 +265,14 @@ def build_mutation_receipt(
         rollback_status = "unavailable"
     else:
         rollback_status = "not_required"
-    reason = mutation_context.get("reason") or "not supplied"
+    reason = mutation_context.get("reason") or write_preflight.get("reason") or "not supplied"
     section = mutation_context.get("section") or "not supplied"
-    destination = mutation_context.get("destination") or record.get("target_path") or "unknown"
+    destination = (
+        mutation_context.get("destination")
+        or write_preflight.get("canonical_destination")
+        or record.get("target_path")
+        or "unknown"
+    )
     safe_reason = "[redacted possible secret]" if _SECRET_LINE_RE.search(str(reason)) else str(reason)[:500]
     rollback_summary = {
         "available": "available with this mutation ID; guarded by postimage SHA-256.",
@@ -308,6 +314,19 @@ def build_mutation_receipt(
         "markdown": markdown,
         "exact_diff": exact_diff,
         "preimage_present": before_text is not None,
+        "write_preflight": {
+            "schema": "obsidian-write-preflight/v1",
+            "source_input_class": write_preflight.get("source_input_class"),
+            "entity_area": write_preflight.get("entity_area"),
+            "capability": write_preflight.get("capability"),
+            "canonical_destination": write_preflight.get("canonical_destination"),
+            "file_kind": write_preflight.get("file_kind"),
+            "operation": write_preflight.get("operation"),
+            "confidence": write_preflight.get("confidence"),
+            "reason": write_preflight.get("reason"),
+            "preimage_requirement": write_preflight.get("preimage_requirement"),
+            "rollback_target": write_preflight.get("rollback_target"),
+        },
     }
 
 

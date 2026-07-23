@@ -18,6 +18,33 @@ PRINCIPAL = "test-bearer-token-abc123"
 EXPECTED_HASH = __import__("hashlib").sha256(PRINCIPAL.encode("utf-8")).hexdigest()
 
 
+def _sha_text(value: str) -> str:
+    return __import__("hashlib").sha256(value.encode("utf-8")).hexdigest()
+
+
+def _preflight(path, *, operation="create", preimage="absent", file_kind="atomic-note", reason="test capture"):
+    return VaultMutationContextInput.model_validate({
+        "reason": reason,
+        "destination": path,
+        "preflight": {
+            "source_input_class": "test-fixture",
+            "entity_area": "01-input/capture",
+            "capability": "capture",
+            "canonical_destination": path,
+            "candidate_destinations": [path],
+            "file_kind": file_kind,
+            "operation": operation,
+            "confidence": 0.99,
+            "reason": reason,
+            "preimage_requirement": preimage,
+            "rollback_target": (
+                f"delete-if-postimage:{path}" if operation == "create"
+                else f"restore-preimage:{path}"
+            ),
+        },
+    })
+
+
 @pytest.fixture
 def audit_log(vault_dir, tmp_path, monkeypatch):
     """Enable auditing to a temp log file with a bound principal; isolate global state."""
@@ -40,8 +67,9 @@ def _records(log_path):
 def test_audit_off_by_default(vault_dir, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "VAULT_AUDIT_LOG_PATH", "")
     log_path = tmp_path / "should-not-exist.jsonl"
-    result = json.loads(server.vault_write("note.md", "body"))
-    assert result["path"] == "note.md"
+    path = "01-input/capture/note.md"
+    result = json.loads(server.vault_write(path, "body", _preflight(path)))
+    assert result["path"] == path
     assert result["mutation_receipt"]["rollback"]["status"] == "unavailable"
     assert not log_path.exists()
     assert audit.should_audit_operation("vault_write") is False
@@ -50,7 +78,8 @@ def test_audit_off_by_default(vault_dir, monkeypatch, tmp_path):
 # --- mutations ---
 
 def test_mutation_writes_record_with_required_fields(audit_log):
-    server.vault_write("audited.md", "hello audit")
+    path = "01-input/capture/audited.md"
+    server.vault_write(path, "hello audit", _preflight(path))
     records = _records(audit_log)
     assert len(records) == 1
     rec = records[0]
@@ -61,7 +90,7 @@ def test_mutation_writes_record_with_required_fields(audit_log):
     ):
         assert field in rec
     assert rec["operation"] == "vault_write"
-    assert rec["target_path"] == "audited.md"
+    assert rec["target_path"] == path
     assert rec["operation_status"] == "success"
     assert rec["size_before"] is None          # new file
     assert rec["size_after"] == len(b"hello audit")
@@ -69,7 +98,8 @@ def test_mutation_writes_record_with_required_fields(audit_log):
 
 
 def test_raw_token_never_written_only_hash(audit_log):
-    server.vault_write("audited.md", "secret content")
+    path = "01-input/capture/audited.md"
+    server.vault_write(path, "secret content", _preflight(path))
     raw = audit_log.read_text(encoding="utf-8")
     assert PRINCIPAL not in raw
     assert _records(audit_log)[0]["token_id_hash"] == EXPECTED_HASH
@@ -77,10 +107,12 @@ def test_raw_token_never_written_only_hash(audit_log):
 
 
 def test_overwrite_captures_before_and_after(audit_log):
-    first = json.loads(server.vault_write("note.md", "first version"))
+    path = "01-input/capture/note.md"
+    first = json.loads(server.vault_write(path, "first version", _preflight(path)))
     server.vault_write(
-        "note.md",
+        path,
         "second, longer version",
+        _preflight(path, operation="update", preimage=f"sha256:{first['sha256']}"),
         overwrite=True,
         expected_sha256=first["sha256"],
     )
@@ -91,8 +123,10 @@ def test_overwrite_captures_before_and_after(audit_log):
 
 
 def test_text_mutation_returns_markdown_provenance_and_guarded_rollback(audit_log, vault_dir):
-    server.vault_write("receipt.md", "Owner content stays.\n")
-    original = (vault_dir / "receipt.md").read_text(encoding="utf-8")
+    path = "01-input/capture/receipt.md"
+    initial = "Owner content stays.\n"
+    server.vault_write(path, initial, _preflight(path))
+    original = (vault_dir / path).read_text(encoding="utf-8")
     source = {
         "provider": "chatgpt",
         "conversation_id": "conversation-1",
@@ -107,10 +141,23 @@ def test_text_mutation_returns_markdown_provenance_and_guarded_rollback(audit_lo
         section="Preferences",
         source=source,
         semantic_facts=["The owner prefers one canonical note."],
+        preflight={
+            "source_input_class": "owner-capture",
+            "entity_area": "01-input/capture",
+            "capability": "capture",
+            "canonical_destination": path,
+            "candidate_destinations": [path],
+            "file_kind": "atomic-note",
+            "operation": "append",
+            "confidence": 0.99,
+            "reason": "Record the missing durable preference",
+            "preimage_requirement": f"sha256:{_sha_text(original)}",
+            "rollback_target": f"restore-preimage:{path}",
+        },
     )
     result = json.loads(
         server.vault_append(
-            "receipt.md",
+            path,
             "The owner prefers one canonical note.",
             separator="",
             mutation=mutation,
@@ -137,13 +184,14 @@ def test_text_mutation_returns_markdown_provenance_and_guarded_rollback(audit_lo
 
     rollback = audit.rollback_mutation(receipt["mutation_id"], confirm=True)
     assert rollback["status"] == "rollback_applied"
-    assert (vault_dir / "receipt.md").read_text(encoding="utf-8") == original
+    assert (vault_dir / path).read_text(encoding="utf-8") == original
     assert audit.rollback_mutation(receipt["mutation_id"], confirm=True)["status"] == "already_rolled_back"
 
 
 def test_mutation_preview_redacts_possible_secret(audit_log):
-    mutation = VaultMutationContextInput(reason="token=never-show", semantic_facts=[])
-    result = json.loads(server.vault_write("redacted-preview.md", "api_key=never-show", mutation=mutation))
+    path = "01-input/capture/redacted-preview.md"
+    mutation = _preflight(path, reason="token=never-show")
+    result = json.loads(server.vault_write(path, "api_key=never-show", mutation))
     public = result["mutation_receipt"]
     assert "never-show" not in public["markdown"]
     assert "[redacted possible secret]" in public["markdown"]
@@ -226,20 +274,34 @@ def test_binary_write_error_is_audited_without_creating_file(audit_log):
 
 def test_mutation_error_recorded(audit_log):
     # A path that escapes the vault returns an error payload (a mutation attempt).
-    result = json.loads(server.vault_write("../escape.md", "x"))
-    assert "error" in result
-    rec = _records(audit_log)[-1]
-    assert rec["operation"] == "vault_write"
-    assert rec["operation_status"] == "error"
-    assert rec["error"]
+    path = "../escape.md"
+    mutation = VaultMutationContextInput.model_validate({
+        "preflight": {
+            "source_input_class": "test-fixture", "entity_area": "01-input/capture",
+            "capability": "capture", "canonical_destination": path,
+            "candidate_destinations": [path], "file_kind": "atomic-note",
+            "operation": "create", "confidence": 0.99, "reason": "invalid path",
+            "preimage_requirement": "absent", "rollback_target": f"delete-if-postimage:{path}",
+        }
+    })
+    result = json.loads(server.vault_write(path, "x", mutation))
+    assert result["error"] == "write_preflight_blocked"
+    assert _records(audit_log) == []
 
 
 def test_move_records_destination(audit_log):
-    server.vault_write("src.md", "movable")
-    server.vault_move("src.md", "dst.md")
+    source = "01-input/capture/src.md"
+    destination = "01-input/capture/dst.md"
+    server.vault_write(source, "movable", _preflight(source))
+    move = _preflight(source, operation="move", preimage=f"sha256:{_sha_text('movable')}")
+    move.preflight.canonical_destination = destination
+    move.preflight.candidate_destinations = [destination]
+    move.preflight.rollback_target = f"move-back:{destination}->{source}"
+    move.destination = destination
+    server.vault_move(source, destination, move)
     rec = _records(audit_log)[-1]
     assert rec["operation"] == "vault_move"
-    assert rec["target_path"] == "dst.md"
+    assert rec["target_path"] == destination
     assert rec["size_after"] == len(b"movable")
 
 
@@ -269,7 +331,8 @@ def test_audit_write_failure_does_not_break_tool(vault_dir, monkeypatch):
     assert audit.audit_path_writable() is False
     token = context.set_request_context(principal=PRINCIPAL, request_id="r", client="c")
     try:
-        result = json.loads(server.vault_write("still-works.md", "body"))
+        path = "01-input/capture/still-works.md"
+        result = json.loads(server.vault_write(path, "body", _preflight(path)))
         assert result["created"] is True        # the write itself succeeded despite audit failing
     finally:
         context.reset_request_context(token)
@@ -280,7 +343,8 @@ def test_audit_log_rotation_is_bounded(audit_log, monkeypatch):
     monkeypatch.setattr(audit, "AUDIT_LOG_BACKUPS", 3)
 
     for index in range(6):
-        server.vault_write(f"rotated-{index}.md", str(index))
+        path = f"01-input/capture/rotated-{index}.md"
+        server.vault_write(path, str(index), _preflight(path))
 
     assert audit_log.exists()
     assert audit_log.with_name(f"{audit_log.name}.1").exists()
@@ -338,30 +402,33 @@ def test_audited_tools_still_registered(vault_dir, name):
 # --- batch: one record per file with correct per-file status (#3) ---
 
 def test_batch_emits_one_record_per_file_with_status(audit_log):
-    server.vault_write("a.md", "---\nx: 1\n---\nbody")
+    path = "01-input/capture/a.md"
+    server.vault_write(path, "---\nx: 1\n---\nbody", _preflight(path))
     # a.md exists, missing.md does not -> partial failure within one batch call
     updates = [
-        {"path": "a.md", "fields": {"status": "done"}},
-        {"path": "missing.md", "fields": {"status": "done"}},
+        {"path": path, "fields": {"status": "done"}},
+        {"path": "01-input/capture/missing.md", "fields": {"status": "done"}},
     ]
     server.vault_batch_frontmatter_update(updates)
     recs = [r for r in _records(audit_log) if r["operation"] == "vault_batch_frontmatter_update"]
     assert len(recs) == 2                      # one record per file, not one for the call
     by_path = {r["target_path"]: r for r in recs}
-    assert by_path["a.md"]["operation_status"] == "success"
-    assert by_path["a.md"]["checksum_after"] is not None   # real snapshot, not null
-    assert by_path["missing.md"]["operation_status"] == "error"   # partial failure surfaced
-    assert by_path["missing.md"]["error"]
+    assert by_path[path]["operation_status"] == "success"
+    assert by_path[path]["checksum_after"] is not None   # real snapshot, not null
+    assert by_path["01-input/capture/missing.md"]["operation_status"] == "error"   # partial failure surfaced
+    assert by_path["01-input/capture/missing.md"]["error"]
 
 
 # --- dry-run edit is not recorded as a mutation (non-blocking item) ---
 
 def test_dry_run_edit_not_audited(audit_log):
-    server.vault_write("edit.md", "alpha beta")
+    path = "01-input/capture/edit.md"
+    server.vault_write(path, "alpha beta", _preflight(path))
     before = len(_records(audit_log))
-    server.vault_edit("edit.md", [{"old_text": "alpha", "new_text": "ALPHA"}], dry_run=True)
+    update = _preflight(path, operation="update", preimage=f"sha256:{_sha_text('alpha beta')}")
+    server.vault_edit(path, [{"old_text": "alpha", "new_text": "ALPHA"}], update, dry_run=True)
     assert len(_records(audit_log)) == before          # dry run wrote nothing, logged nothing
-    server.vault_edit("edit.md", [{"old_text": "alpha", "new_text": "ALPHA"}])
+    server.vault_edit(path, [{"old_text": "alpha", "new_text": "ALPHA"}], update)
     assert len(_records(audit_log)) == before + 1       # the real edit IS audited
 
 

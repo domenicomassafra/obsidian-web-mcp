@@ -155,8 +155,17 @@ raw token is never written), `client_id` (a best-effort User-Agent hint), `opera
 {"checksum_after":"9f86d0…","checksum_before":null,"client_id":"claude","error":null,"operation":"vault_write","operation_status":"success","request_id":"a1b2…","size_after":42,"size_before":null,"target_path":"notes/today.md","timestamp":"2026-06-14T18:30:00+00:00","token_id_hash":"5e88…"}
 ```
 
-Text mutations (`vault_write`, `vault_edit`, and `vault_append`) also accept an optional
-`mutation` context with `reason`, `destination`, `section`, a source identity
+Every mutation exposed by the ChatGPT-facing `context` profile (`vault_write`,
+`vault_edit`, `vault_append`, `vault_move`, and `vault_delete`) requires a `mutation`
+context with a structured `preflight`. The model proposes the plan, but the shared MCP
+gate validates it against the actual destination, owner root, file kind, operation,
+current preimage SHA-256 and rollback target before any tool can materialize the change.
+Ambiguous destinations, cross-owner paths, stale/missing preimages, and an atomic brief
+aimed at a README/index/hub fail closed with `write_executed=false`. Area names are not
+hardcoded: `entity_area` carries the current canonical `04-areas/<slug>` anchor returned
+by context resolution, so renames do not require a plugin release.
+
+The same `mutation` context can include `reason`, `destination`, `section`, a source identity
 (`provider`, `conversation_id`, optional `message_id`, `content_sha256` and
 `message_sha256`) and canonical `semantic_facts`. Their JSON result contains a bounded
 `mutation_receipt.markdown` recap with the file, line delta, redacted preview, reason,
