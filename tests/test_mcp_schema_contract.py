@@ -62,7 +62,7 @@ def test_vault_write_advertises_conflict_guards():
 
 
 def test_public_tool_count_remains_stable():
-    assert len(server.mcp._tool_manager._tools) == 25
+    assert len(server.mcp._tool_manager._tools) == 29
 
 
 def test_batch_frontmatter_update_is_marked_destructive():

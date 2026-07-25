@@ -75,6 +75,10 @@ Found a vulnerability? Please report it privately rather than opening a public i
 | `vault_daily_note_append` | Append to today's daily note, creating it from the template when missing |
 | `vault_analytics_summary` | Compact vault-hygiene summary: counts and examples of missing frontmatter, broken wikilinks, near-duplicate tag variants, and non-UTF-8 files |
 | `vault_analytics_findings` | Detailed findings for one analytics category (`frontmatter_missing`, `required_frontmatter_missing`, `broken_wikilinks`, `suspicious_tag_variants`, `encoding_issues`, `oversized_files`) |
+| `learning_get_today` | Read the bounded Life OS review queue with canonical note paths and body-free Notebook pointers |
+| `learning_set_intent` | Append an idempotent queue decision without claiming reading, study, or mastery |
+| `learning_record_review` | Append one real recall attempt after answer-before-reveal |
+| `learning_get_history` | Read replayed intent/review history and current evidence for one stable UID |
 
 ## Prerequisites
 

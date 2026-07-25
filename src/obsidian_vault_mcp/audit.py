@@ -62,6 +62,16 @@ MUTATION_OPERATIONS = {
     "vault_canvas_add_node",
     "vault_canvas_add_edge",
     "vault_daily_note_append",
+    "learning_set_intent",
+    "learning_record_review",
+}
+
+# Append-only learning events contain the owner's recall text. They receive the
+# normal before/after checksum audit, but never the generic text receipt or
+# preimage snapshot. Rollback belongs to the canonical ledger's void event.
+SENSITIVE_EVENT_OPERATIONS = {
+    "learning_set_intent",
+    "learning_record_review",
 }
 
 # Read/search operations. Audited only when VAULT_AUDIT_LOG_INCLUDE_READS is enabled.
@@ -73,6 +83,8 @@ READ_OPERATIONS = {
     "vault_list",
     "vault_canvas_read",
     "vault_daily_note_read",
+    "learning_get_today",
+    "learning_get_history",
 }
 
 # Mutations whose result reports per-file outcomes; audited one record per file.

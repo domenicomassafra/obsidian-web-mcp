@@ -37,6 +37,7 @@ from .frontmatter_index import FrontmatterIndex
 from .audit import (
     BATCH_OPERATIONS,
     MUTATION_OPERATIONS,
+    SENSITIVE_EVENT_OPERATIONS,
     audit_enabled,
     audit_log_path,
     audit_path_inside_vault,
@@ -179,6 +180,13 @@ from .context_engine import (
 from .tools.analytics import (
     vault_analytics_summary as _vault_analytics_summary,
     vault_analytics_findings as _vault_analytics_findings,
+)
+from .tools.learning import (
+    learning_event_path as _learning_event_path,
+    learning_get_history as _learning_get_history,
+    learning_get_today as _learning_get_today,
+    learning_record_review as _learning_record_review,
+    learning_set_intent as _learning_set_intent,
 )
 from .models import (
     VaultReadInput,
@@ -449,7 +457,13 @@ def _run_audited(operation: str, func, **context) -> str:
         return _run_audited_batch(operation, func, context)
 
     before = snapshot_path(before_target_path(operation, context)) if is_mutation else None
-    before_text = snapshot_text(before_target_path(operation, context)) if is_mutation else None
+    receipt_enabled = (
+        is_mutation and operation not in SENSITIVE_EVENT_OPERATIONS
+    )
+    before_text = (
+        snapshot_text(before_target_path(operation, context))
+        if receipt_enabled else None
+    )
 
     try:
         result = func()
@@ -473,6 +487,7 @@ def _run_audited(operation: str, func, **context) -> str:
             operation=operation, target_path=target_path, before=before,
             after=snapshot_path(target_path), operation_status=status, error=error,
         )
+    if receipt_enabled:
         receipt = build_mutation_receipt(
             record,
             before_text,
@@ -491,14 +506,14 @@ def _run_audited(operation: str, func, **context) -> str:
         record["fact_id_scheme"] = receipt["fact_id_scheme"]
         record["semantic_fact_ids"] = receipt["semantic_fact_ids"]
         record["source_identity"] = receipt["source_identity"]
-    else:
+    elif not is_mutation:
         record = build_audit_record(
             operation=operation, target_path=target_path,
             before=snapshot_path(target_path), operation_status=status, error=error,
         )
     if audited:
         write_audit_record(record)
-    return attach_mutation_receipt(result, receipt) if is_mutation else result
+    return attach_mutation_receipt(result, receipt) if receipt_enabled else result
 
 
 def _run_audited_batch(operation: str, func, context: dict) -> str:
@@ -1103,6 +1118,104 @@ def vault_context_proposal(
 
 
 @mcp.tool(
+    name="learning_get_today",
+    description=(
+        "Get the bounded Life OS study queue: due items first, then owner-enrolled "
+        "new concepts. Returns canonical Obsidian paths and body-free current/stale "
+        "Notebook pointers. Reading the queue never creates learning evidence."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def learning_get_today(
+    date: str | None = None,
+    surface: Literal["knowledge", "media"] = "knowledge",
+    all_items: bool = False,
+) -> str:
+    return _run_audited(
+        "learning_get_today",
+        lambda: _learning_get_today(date, surface, all_items),
+        path="00-system/learning-state.json",
+    )
+
+
+@mcp.tool(
+    name="learning_set_intent",
+    description=(
+        "Enroll or reclassify one stable Knowledge/Media UID without claiming it "
+        "was read, studied or learned. Reusing the same attempt_id with the same "
+        "content is an idempotent replay; changed content fails closed."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def learning_set_intent(
+    uid: Annotated[str, Field(min_length=1, max_length=200)],
+    intent: Literal["reference_only", "read_later", "study", "apply", "archive"],
+    reason: Annotated[str, Field(min_length=1, max_length=500)],
+    attempt_id: Annotated[
+        str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    ],
+    client: Literal["chatgpt", "hermes", "lifeos-mcp"] = "chatgpt",
+) -> str:
+    return _run_audited(
+        "learning_set_intent",
+        lambda: _learning_set_intent(uid, intent, reason, attempt_id, client),
+        path=_learning_event_path(client),
+    )
+
+
+@mcp.tool(
+    name="learning_record_review",
+    description=(
+        "Record one real owner recall attempt after asking before reveal. "
+        "Good/Easy require recall text; mastery is never inferred. Reusing the same "
+        "attempt_id with the same content is an idempotent replay."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def learning_record_review(
+    uid: Annotated[str, Field(min_length=1, max_length=200)],
+    rating: Literal["Again", "Hard", "Good", "Easy"],
+    recall_attempted: Literal[True],
+    recall_text: Annotated[str, Field(max_length=2000)],
+    attempt_id: Annotated[
+        str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    ],
+    elapsed_ms: Annotated[int, Field(ge=0, le=7_200_000)] = 0,
+    mastery: Literal[
+        "unknown", "familiar", "understood", "practiced", "mastered"
+    ] | None = None,
+    client: Literal["chatgpt", "hermes", "lifeos-mcp"] = "chatgpt",
+) -> str:
+    return _run_audited(
+        "learning_record_review",
+        lambda: _learning_record_review(
+            uid, rating, recall_attempted, recall_text, attempt_id,
+            elapsed_ms, mastery, client,
+        ),
+        path=_learning_event_path(client),
+    )
+
+
+@mcp.tool(
+    name="learning_get_history",
+    description=(
+        "Get replayed learning state, intent changes and review attempts for one "
+        "stable UID, plus its canonical Obsidian path and current/stale Notebook pointers."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def learning_get_history(
+    uid: Annotated[str, Field(min_length=1, max_length=200)],
+    date: str | None = None,
+) -> str:
+    return _run_audited(
+        "learning_get_history",
+        lambda: _learning_get_history(uid, date),
+        path="00-system/learning-state.json",
+    )
+
+
+@mcp.tool(
     name="vault_analytics_summary",
     description=(
         "Return a compact analytics summary for vault hygiene, including frontmatter, link, tag, and encoding "
@@ -1170,6 +1283,10 @@ _CONTEXT_PROFILE_TOOLS = frozenset({
     "vault_append",
     "vault_move",
     "vault_delete",
+    "learning_get_today",
+    "learning_set_intent",
+    "learning_record_review",
+    "learning_get_history",
 })
 
 
