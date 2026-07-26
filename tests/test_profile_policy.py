@@ -272,3 +272,91 @@ def test_denial_audit_records_bound_profile_without_reading(
     assert record["operation_status"] == "blocked"
     assert record["policy_decision"] == "deny"
     assert record["error"] == "profile_policy_denied"
+
+
+def test_signor_studio_gates_configured_daily_paths_before_read(
+    vault_dir,
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "VAULT_DAILY_NOTES_FOLDER", "06-life/daily")
+    life_daily = vault_dir / "06-life" / "daily"
+    life_daily.mkdir(parents=True)
+    (life_daily / "2026-07-26.md").write_text(
+        "PRIVATE DAILY",
+        encoding="utf-8",
+    )
+
+    token = _as_signor_studio()
+    try:
+        path = _assert_denied(server.vault_daily_note_path("2026-07-26"))
+        single = _assert_denied(server.vault_daily_note_read("2026-07-26"))
+        date_range = _assert_denied(server.vault_daily_note_read_range(
+            "2026-07-26",
+            "2026-07-26",
+        ))
+    finally:
+        context.reset_request_context(token)
+
+    assert path["operation"] == "vault_daily_note_path"
+    assert single["operation"] == "vault_daily_note_read"
+    assert date_range["operation"] == "vault_daily_note_read_range"
+    assert "PRIVATE DAILY" not in json.dumps([path, single, date_range])
+
+
+def test_signor_studio_allows_safe_configured_daily_reads(
+    vault_dir,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        config,
+        "VAULT_DAILY_NOTES_FOLDER",
+        "05-knowledge/daily",
+    )
+    safe_daily = vault_dir / "05-knowledge" / "daily"
+    safe_daily.mkdir(parents=True)
+    (safe_daily / "2026-07-26.md").write_text("SAFE DAILY", encoding="utf-8")
+
+    token = _as_signor_studio()
+    try:
+        single = json.loads(server.vault_daily_note_read("2026-07-26"))
+        date_range = json.loads(server.vault_daily_note_read_range(
+            "2026-07-26",
+            "2026-07-26",
+        ))
+    finally:
+        context.reset_request_context(token)
+
+    assert single["content"] == "SAFE DAILY"
+    assert date_range["notes"][0]["content"] == "SAFE DAILY"
+
+
+def test_owner_context_read_and_proposal_route_once(monkeypatch):
+    calls: list[str] = []
+
+    def fake_route(*_args, **_kwargs):
+        calls.append("route")
+        return {"receipt": {"selected_paths": []}}
+
+    def fake_read(*args, **kwargs):
+        return fake_route(*args, **kwargs)
+
+    def fake_proposal(*args, **kwargs):
+        return fake_route(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_route_context", fake_route)
+    monkeypatch.setattr(server, "_read_context", fake_read)
+    monkeypatch.setattr(server, "_propose_context", fake_proposal)
+    token = context.set_request_context(
+        principal="owner-token",
+        request_id="owner-request",
+        client="pytest",
+        profile="owner",
+    )
+    try:
+        server.vault_context_read("project context")
+        assert calls == ["route"]
+        calls.clear()
+        server.vault_context_proposal("project context")
+        assert calls == ["route"]
+    finally:
+        context.reset_request_context(token)

@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
@@ -168,6 +169,7 @@ from .tools.canvas import (
 )
 from .tools.daily import (
     _daily_note_path,
+    _parse_date,
     _today,
     vault_daily_note_path as _vault_daily_note_path,
     vault_daily_note_read as _vault_daily_note_read,
@@ -367,25 +369,6 @@ def _profile_policy_block(operation: str, **context) -> str | None:
             target_path=paths,
         )
     return None
-
-
-def _routed_paths(route: dict) -> list[str]:
-    """Collect every path a context route requested, including missing paths."""
-    receipt = route.get("receipt", {})
-    if not isinstance(receipt, dict):
-        return []
-    paths = [
-        value
-        for key in ("required", "selected_paths", "missing")
-        for value in receipt.get(key, [])
-        if isinstance(value, str)
-    ]
-    paths.extend(
-        item["path"]
-        for item in receipt.get("skipped", [])
-        if isinstance(item, dict) and isinstance(item.get("path"), str)
-    )
-    return list(dict.fromkeys(paths))
 
 
 def _is_index_path(path: str) -> bool:
@@ -1108,6 +1091,13 @@ def vault_canvas_add_edge(path: str, edge: CanvasEdgeInput) -> str:
 )
 def vault_daily_note_path(date: str | None = None) -> str:
     """Resolve a Europe/Rome daily-note path; omit date for today."""
+    try:
+        path = _daily_note_path(_parse_date(date))
+    except ValueError:
+        return _vault_daily_note_path(date)
+    policy_block = _profile_policy_block("vault_daily_note_path", path=path)
+    if policy_block is not None:
+        return policy_block
     return _vault_daily_note_path(date)
 
 
@@ -1121,7 +1111,15 @@ def vault_daily_note_path(date: str | None = None) -> str:
 )
 def vault_daily_note_read(date: str | None = None) -> str:
     """Read an arbitrary Europe/Rome daily note; omit date for today."""
-    return _run_audited("vault_daily_note_read", lambda: _vault_daily_note_read(date))
+    try:
+        path = _daily_note_path(_parse_date(date))
+    except ValueError:
+        return _vault_daily_note_read(date)
+    return _run_audited(
+        "vault_daily_note_read",
+        lambda: _vault_daily_note_read(date),
+        path=path,
+    )
 
 
 @mcp.tool(
@@ -1139,11 +1137,28 @@ def vault_daily_note_read_range(
     total_chars: Annotated[int, Field(ge=1, le=80000)] = 40000,
 ) -> str:
     """Read a bounded inclusive daily-note range."""
+    try:
+        start = _parse_date(start_date)
+        end = _parse_date(end_date)
+        if end < start:
+            raise ValueError
+        days = (end - start).days + 1
+        if days > 31:
+            raise ValueError
+        paths = [
+            _daily_note_path(start + timedelta(days=offset))
+            for offset in range(days)
+        ]
+    except ValueError:
+        return _vault_daily_note_read_range(
+            start_date, end_date, max_chars_per_file, total_chars
+        )
     return _run_audited(
         "vault_daily_note_read_range",
         lambda: _vault_daily_note_read_range(
             start_date, end_date, max_chars_per_file, total_chars
         ),
+        paths=paths,
     )
 
 
@@ -1234,14 +1249,6 @@ def vault_context_read(
     if policy_block is not None:
         return policy_block
     try:
-        route = _route_context(
-            request,
-            frontmatter_index,
-            reference_date=reference_date,
-            start_date=start_date,
-            end_date=end_date,
-            include_archives=include_archives,
-        )
         return dumps(_read_context(
             request,
             frontmatter_index,
@@ -1277,13 +1284,6 @@ def vault_context_proposal(
     if policy_block is not None:
         return policy_block
     try:
-        route = _route_context(
-            request,
-            frontmatter_index,
-            reference_date=reference_date,
-            start_date=start_date,
-            end_date=end_date,
-        )
         return dumps(_propose_context(
             request,
             frontmatter_index,
