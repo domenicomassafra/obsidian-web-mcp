@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from obsidian_vault_mcp import context, server
-from obsidian_vault_mcp.models import FrontmatterUpdateInput
+from obsidian_vault_mcp import config, context, server
+from obsidian_vault_mcp.models import FrontmatterUpdateInput, VaultEditOperationInput
 
 
 def _as_signor_studio():
@@ -189,3 +189,86 @@ def test_signor_studio_denies_context_routes_that_select_life(vault_dir):
 
     assert route["operation"] == "vault_context_route"
     assert read["operation"] == "vault_context_read"
+
+
+def test_signor_studio_context_is_denied_before_routing(monkeypatch):
+    def forbidden_route(*_args, **_kwargs):
+        raise AssertionError("context routing must not inspect the vault")
+
+    monkeypatch.setattr(server, "_route_context", forbidden_route)
+    token = _as_signor_studio()
+    try:
+        route = _assert_denied(server.vault_context_route("safe project context"))
+        read = _assert_denied(server.vault_context_read("safe project context"))
+        proposal = _assert_denied(
+            server.vault_context_proposal("safe project context")
+        )
+    finally:
+        context.reset_request_context(token)
+
+    assert route["access_executed"] is False
+    assert read["access_executed"] is False
+    assert proposal["access_executed"] is False
+
+
+def test_signor_studio_denies_edit_dry_run_before_reading(vault_dir):
+    life = vault_dir / "06-life"
+    life.mkdir()
+    private = life / "private.md"
+    private.write_text("TOP-SECRET", encoding="utf-8")
+
+    token = _as_signor_studio()
+    try:
+        result = _assert_denied(server.vault_edit(
+            "06-life/private.md",
+            [VaultEditOperationInput(old_text="TOP", new_text="SAFE")],
+            None,
+            dry_run=True,
+        ))
+    finally:
+        context.reset_request_context(token)
+
+    assert result["operation"] == "vault_edit"
+    assert "TOP-SECRET" not in json.dumps(result)
+    assert private.read_text(encoding="utf-8") == "TOP-SECRET"
+
+
+def test_unknown_bound_profile_fails_closed(vault_dir):
+    note = vault_dir / "test-note.md"
+    token = context.set_request_context(
+        principal="test-token",
+        request_id="request-unknown",
+        client="pytest",
+        profile="other",
+    )
+    try:
+        result = json.loads(server.vault_read("test-note.md"))
+    finally:
+        context.reset_request_context(token)
+
+    assert result["error"] == "profile_policy_denied"
+    assert result["profile"] == "other"
+    assert result["operation"] == "vault_read"
+    assert note.is_file()
+
+
+def test_denial_audit_records_bound_profile_without_reading(
+    vault_dir,
+    tmp_path,
+    monkeypatch,
+):
+    audit_log = tmp_path / "audit" / "vault.jsonl"
+    monkeypatch.setattr(config, "VAULT_AUDIT_LOG_PATH", str(audit_log))
+    monkeypatch.setattr(config, "VAULT_AUDIT_LOG_INCLUDE_READS", False)
+    token = _as_signor_studio()
+    try:
+        _assert_denied(server.vault_read("06-life/private.md"))
+    finally:
+        context.reset_request_context(token)
+
+    record = json.loads(audit_log.read_text(encoding="utf-8"))
+    assert record["profile"] == "signorstudio"
+    assert record["operation"] == "vault_read"
+    assert record["operation_status"] == "blocked"
+    assert record["policy_decision"] == "deny"
+    assert record["error"] == "profile_policy_denied"

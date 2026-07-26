@@ -9,7 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from . import config
-from .config import VAULT_MCP_TOKEN
+from .config import VAULT_MCP_SIGNORSTUDIO_TOKEN, VAULT_MCP_TOKEN
 from .context import reset_request_context, set_request_context
 
 # Paths that don't require bearer auth (OAuth flow + health)
@@ -30,6 +30,8 @@ _AUTH_EXEMPT_METHOD_PATHS = (
     {("GET", "/"), ("HEAD", "/")} if config.VAULT_MCP_PATH != "/" else set()
 )
 _PROFILE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_OWNER_PROFILE = "owner"
+_SIGNOR_STUDIO_PROFILE = "signorstudio"
 
 
 def _www_authenticate(request: Request, error: str) -> str:
@@ -72,19 +74,27 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             )
 
         token = auth_header[7:]
-        # Constant-time compare: avoid leaking the token via response timing (#2).
-        if not hmac.compare_digest(token, VAULT_MCP_TOKEN):
+        owner_match = hmac.compare_digest(token, VAULT_MCP_TOKEN)
+        signor_studio_match = bool(VAULT_MCP_SIGNORSTUDIO_TOKEN) and hmac.compare_digest(
+            token, VAULT_MCP_SIGNORSTUDIO_TOKEN
+        )
+        if owner_match and signor_studio_match:
+            return JSONResponse(
+                {"error": "Server misconfigured: profile tokens must be distinct"},
+                status_code=500,
+            )
+        if not owner_match and not signor_studio_match:
             return JSONResponse(
                 {"error": "Invalid token"},
                 status_code=401,
                 headers={"WWW-Authenticate": _www_authenticate(request, "invalid_token")},
             )
 
-        # Thread the authenticated principal (plus a request id and best-effort client
-        # hint) to the tool layer for the audit log. The raw token never leaves this
-        # context; audit.build_audit_record stores only its SHA-256 hash. client_id is a
-        # User-Agent-derived hint -- it becomes a true per-client id if the static bearer
-        # token is ever replaced with per-client tokens.
+        # Bind the profile to the authenticated bearer. X-Dodo-Profile is only a
+        # consistency assertion; it can never grant or remove privileges.
+        bound_profile = (
+            _SIGNOR_STUDIO_PROFILE if signor_studio_match else _OWNER_PROFILE
+        )
         client = request.headers.get("user-agent", "").strip()[:200] or None
         raw_profile = request.headers.get("x-dodo-profile", "").strip().casefold()
         if raw_profile and not _PROFILE_PATTERN.fullmatch(raw_profile):
@@ -92,12 +102,16 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 {"error": "Invalid X-Dodo-Profile header"},
                 status_code=400,
             )
-        profile = raw_profile or None
+        if raw_profile and raw_profile != bound_profile:
+            return JSONResponse(
+                {"error": "X-Dodo-Profile does not match authenticated client"},
+                status_code=403,
+            )
         ctx_token = set_request_context(
             principal=token,
             request_id=uuid.uuid4().hex,
             client=client,
-            profile=profile,
+            profile=bound_profile,
         )
         try:
             return await call_next(request)

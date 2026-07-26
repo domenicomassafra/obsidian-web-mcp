@@ -4,6 +4,7 @@ from pathlib import Path
 # Vault configuration
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", os.path.expanduser("~/Obsidian/MyVault")))
 VAULT_MCP_TOKEN = os.environ.get("VAULT_MCP_TOKEN", "")
+VAULT_MCP_SIGNORSTUDIO_TOKEN = os.environ.get("VAULT_MCP_SIGNORSTUDIO_TOKEN", "")
 VAULT_MCP_PORT = int(os.environ.get("VAULT_MCP_PORT", "8420"))
 
 # Daily-note tools. FOLDER "" means the vault root; FORMAT/TEMPLATE are strftime
@@ -250,3 +251,10 @@ def validate_config() -> None:
     CLOSED with a clear message instead of booting a broken or insecure server.
     """
     _validate_mcp_path(VAULT_MCP_PATH)
+    if (
+        VAULT_MCP_SIGNORSTUDIO_TOKEN
+        and VAULT_MCP_SIGNORSTUDIO_TOKEN == VAULT_MCP_TOKEN
+    ):
+        raise ValueError(
+            "VAULT_MCP_SIGNORSTUDIO_TOKEN must differ from VAULT_MCP_TOKEN"
+        )

@@ -247,7 +247,13 @@ _ATOMIC_MARKERS = (
     "series",
 )
 _SIGNOR_STUDIO_PROFILE = "signorstudio"
+_OWNER_PROFILE = "owner"
 _SIGNOR_STUDIO_FORBIDDEN_ROOT = "06-life"
+_PROFILE_BOUND_CONTEXT_OPERATIONS = frozenset({
+    "vault_context_route",
+    "vault_context_read",
+    "vault_context_proposal",
+})
 _EXPLICIT_SCOPE_OPERATIONS = frozenset({
     "vault_search",
     "vault_search_frontmatter",
@@ -257,12 +263,27 @@ _EXPLICIT_SCOPE_OPERATIONS = frozenset({
 })
 
 
-def _profile_policy_denial(operation: str, reason: str) -> str:
+def _profile_policy_denial(
+    operation: str,
+    reason: str,
+    target_path=None,
+) -> str:
     """Return a stable no-access/no-write receipt for a profile policy block."""
+    profile = current_request_context().get("profile")
+    if audit_enabled():
+        record = build_audit_record(
+            operation=operation,
+            target_path=target_path,
+            operation_status="blocked",
+            error="profile_policy_denied",
+        )
+        record["policy_decision"] = "deny"
+        record["policy_reason"] = reason
+        write_audit_record(record)
     return dumps({
         "error": "profile_policy_denied",
         "status": "blocked",
-        "profile": _SIGNOR_STUDIO_PROFILE,
+        "profile": profile,
         "operation": operation,
         "forbidden_root": _SIGNOR_STUDIO_FORBIDDEN_ROOT,
         "reason": reason,
@@ -308,14 +329,25 @@ def _path_crosses_signor_studio_boundary(path: str) -> bool:
 def _profile_policy_block(operation: str, **context) -> str | None:
     """Enforce profile-owned vault boundaries before any tool implementation."""
     profile = current_request_context().get("profile")
+    if profile is not None and profile not in {_OWNER_PROFILE, _SIGNOR_STUDIO_PROFILE}:
+        return _profile_policy_denial(
+            operation,
+            "Authenticated profile binding is unknown",
+        )
     if profile != _SIGNOR_STUDIO_PROFILE:
         return None
+    if operation in _PROFILE_BOUND_CONTEXT_OPERATIONS:
+        return _profile_policy_denial(
+            operation,
+            "Signor Studio must use explicitly scoped vault or learning tools",
+        )
 
     scope = context.get("path_prefix") or context.get("path")
     if operation in _EXPLICIT_SCOPE_OPERATIONS and not scope:
         return _profile_policy_denial(
             operation,
             "Signor Studio requires an explicit path outside 06-life for broad tools",
+            target_path=scope,
         )
 
     paths: list[str] = []
@@ -332,6 +364,7 @@ def _profile_policy_block(operation: str, **context) -> str | None:
         return _profile_policy_denial(
             operation,
             "Signor Studio cannot access 06-life or path aliases/traversal",
+            target_path=paths,
         )
     return None
 
@@ -803,6 +836,9 @@ def vault_edit(
     inp = VaultEditInput(path=path, edits=edits, dry_run=dry_run)
     if inp.dry_run:
         # A dry run writes nothing; don't record it as a mutation.
+        policy_block = _profile_policy_block("vault_edit", path=inp.path)
+        if policy_block is not None:
+            return policy_block
         return _vault_edit(inp.path, [edit.model_dump() for edit in inp.edits], inp.dry_run)
     return _run_audited(
         "vault_edit",
@@ -1156,6 +1192,9 @@ def vault_context_route(
     include_archives: bool = False,
 ) -> str:
     """Return a body-free deterministic context route."""
+    policy_block = _profile_policy_block("vault_context_route")
+    if policy_block is not None:
+        return policy_block
     try:
         route = _route_context(
             request,
@@ -1165,11 +1204,7 @@ def vault_context_route(
             end_date=end_date,
             include_archives=include_archives,
         )
-        policy_block = _profile_policy_block(
-            "vault_context_route",
-            paths=_routed_paths(route),
-        )
-        return policy_block if policy_block is not None else dumps(route)
+        return dumps(route)
     except ValueError as exc:
         return dumps({"error": str(exc)})
 
@@ -1195,6 +1230,9 @@ def vault_context_read(
     include_archives: bool = False,
 ) -> str:
     """Return bounded routed context with a complete selection receipt."""
+    policy_block = _profile_policy_block("vault_context_read")
+    if policy_block is not None:
+        return policy_block
     try:
         route = _route_context(
             request,
@@ -1204,12 +1242,6 @@ def vault_context_read(
             end_date=end_date,
             include_archives=include_archives,
         )
-        policy_block = _profile_policy_block(
-            "vault_context_read",
-            paths=_routed_paths(route),
-        )
-        if policy_block is not None:
-            return policy_block
         return dumps(_read_context(
             request,
             frontmatter_index,
@@ -1241,6 +1273,9 @@ def vault_context_proposal(
     end_date: str | None = None,
 ) -> str:
     """Return a no-write proposal or an immediate-safety handoff."""
+    policy_block = _profile_policy_block("vault_context_proposal")
+    if policy_block is not None:
+        return policy_block
     try:
         route = _route_context(
             request,
@@ -1249,12 +1284,6 @@ def vault_context_proposal(
             start_date=start_date,
             end_date=end_date,
         )
-        policy_block = _profile_policy_block(
-            "vault_context_proposal",
-            paths=_routed_paths(route),
-        )
-        if policy_block is not None:
-            return policy_block
         return dumps(_propose_context(
             request,
             frontmatter_index,

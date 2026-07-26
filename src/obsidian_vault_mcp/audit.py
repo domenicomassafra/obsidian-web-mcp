@@ -450,6 +450,7 @@ def build_audit_record(
         "timestamp": _now_utc().isoformat(),
         "token_id_hash": _hash_value(ctx.get("principal")),
         "client_id": ctx.get("client"),
+        "profile": ctx.get("profile"),
         "operation": operation,
         "target_path": target_path,
         "size_before": before.get("size"),

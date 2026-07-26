@@ -51,7 +51,12 @@ def audit_log(vault_dir, tmp_path, monkeypatch):
     log_path = tmp_path / "audit" / "mutations.jsonl"
     monkeypatch.setattr(config, "VAULT_AUDIT_LOG_PATH", str(log_path))
     monkeypatch.setattr(config, "VAULT_AUDIT_LOG_INCLUDE_READS", False)
-    token = context.set_request_context(principal=PRINCIPAL, request_id="req-1", client="pytest")
+    token = context.set_request_context(
+        principal=PRINCIPAL,
+        request_id="req-1",
+        client="pytest",
+        profile="owner",
+    )
     yield log_path
     context.reset_request_context(token)
 
@@ -86,10 +91,11 @@ def test_mutation_writes_record_with_required_fields(audit_log):
     for field in (
         "timestamp", "token_id_hash", "client_id", "operation", "target_path",
         "size_before", "size_after", "checksum_before", "checksum_after",
-        "request_id", "operation_status", "error",
+        "request_id", "profile", "operation_status", "error",
     ):
         assert field in rec
     assert rec["operation"] == "vault_write"
+    assert rec["profile"] == "owner"
     assert rec["target_path"] == path
     assert rec["operation_status"] == "success"
     assert rec["size_before"] is None          # new file
