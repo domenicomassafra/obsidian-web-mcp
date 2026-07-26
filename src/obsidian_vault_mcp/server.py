@@ -8,6 +8,7 @@ import atexit
 import json
 import logging
 import os
+import posixpath
 import re
 import sys
 import threading
@@ -22,6 +23,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
+from . import config as vault_config
 from .config import (
     VAULT_AUDIT_LOG_INCLUDE_READS,
     VAULT_MCP_ALLOWED_HOSTS,
@@ -56,6 +58,7 @@ from .audit import (
 from .rate_limit import check_tool_rate_limit
 from .serialization import dumps
 from .write_events import register_write_listener
+from .context import current_request_context
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +246,113 @@ _ATOMIC_MARKERS = (
     "serie",
     "series",
 )
+_SIGNOR_STUDIO_PROFILE = "signorstudio"
+_SIGNOR_STUDIO_FORBIDDEN_ROOT = "06-life"
+_EXPLICIT_SCOPE_OPERATIONS = frozenset({
+    "vault_search",
+    "vault_search_frontmatter",
+    "vault_list",
+    "vault_analytics_summary",
+    "vault_analytics_findings",
+})
+
+
+def _profile_policy_denial(operation: str, reason: str) -> str:
+    """Return a stable no-access/no-write receipt for a profile policy block."""
+    return dumps({
+        "error": "profile_policy_denied",
+        "status": "blocked",
+        "profile": _SIGNOR_STUDIO_PROFILE,
+        "operation": operation,
+        "forbidden_root": _SIGNOR_STUDIO_FORBIDDEN_ROOT,
+        "reason": reason,
+        "access_executed": False,
+        "write_executed": False,
+    })
+
+
+def _path_crosses_signor_studio_boundary(path: str) -> bool:
+    """Reject lexical, traversal and symlink aliases into ``06-life``."""
+    raw = path.strip().replace("\\", "/")
+    for _ in range(3):
+        decoded = urllib.parse.unquote(raw)
+        if decoded == raw:
+            break
+        raw = decoded.replace("\\", "/")
+    if not raw:
+        return False
+    parts = PurePosixPath(raw).parts
+    if raw.startswith("/") or "." in parts or ".." in parts:
+        return True
+
+    normalized = posixpath.normpath(raw)
+    normalized_parts = PurePosixPath(normalized).parts
+    if (
+        normalized_parts
+        and normalized_parts[0].casefold() == _SIGNOR_STUDIO_FORBIDDEN_ROOT
+    ):
+        return True
+
+    vault_root = vault_config.VAULT_PATH.expanduser().resolve()
+    resolved = (vault_root / normalized).resolve(strict=False)
+    try:
+        resolved_parts = resolved.relative_to(vault_root).parts
+    except ValueError:
+        return True
+    return bool(
+        resolved_parts
+        and resolved_parts[0].casefold() == _SIGNOR_STUDIO_FORBIDDEN_ROOT
+    )
+
+
+def _profile_policy_block(operation: str, **context) -> str | None:
+    """Enforce profile-owned vault boundaries before any tool implementation."""
+    profile = current_request_context().get("profile")
+    if profile != _SIGNOR_STUDIO_PROFILE:
+        return None
+
+    scope = context.get("path_prefix") or context.get("path")
+    if operation in _EXPLICIT_SCOPE_OPERATIONS and not scope:
+        return _profile_policy_denial(
+            operation,
+            "Signor Studio requires an explicit path outside 06-life for broad tools",
+        )
+
+    paths: list[str] = []
+    for key in ("path", "path_prefix", "source", "destination"):
+        value = context.get(key)
+        if isinstance(value, str) and value:
+            paths.append(value)
+    paths.extend(
+        value
+        for value in (context.get("paths") or [])
+        if isinstance(value, str) and value
+    )
+    if any(_path_crosses_signor_studio_boundary(path) for path in paths):
+        return _profile_policy_denial(
+            operation,
+            "Signor Studio cannot access 06-life or path aliases/traversal",
+        )
+    return None
+
+
+def _routed_paths(route: dict) -> list[str]:
+    """Collect every path a context route requested, including missing paths."""
+    receipt = route.get("receipt", {})
+    if not isinstance(receipt, dict):
+        return []
+    paths = [
+        value
+        for key in ("required", "selected_paths", "missing")
+        for value in receipt.get(key, [])
+        if isinstance(value, str)
+    ]
+    paths.extend(
+        item["path"]
+        for item in receipt.get("skipped", [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    )
+    return list(dict.fromkeys(paths))
 
 
 def _is_index_path(path: str) -> bool:
@@ -420,6 +530,10 @@ def _run_audited(operation: str, func, **context) -> str:
     audit-write failure is swallowed inside write_audit_record so the trail can never break
     the tool result.
     """
+    policy_block = _profile_policy_block(operation, **context)
+    if policy_block is not None:
+        return policy_block
+
     if operation in _PREFLIGHT_REQUIRED_OPERATIONS:
         plan, errors = _validate_write_preflight(operation, context)
         if errors:
@@ -600,6 +714,7 @@ def vault_batch_read(
     return _run_audited(
         "vault_batch_read",
         lambda: _vault_batch_read(inp.paths, inp.include_content, inp.include_archives),
+        paths=inp.paths,
     )
 
 
@@ -777,6 +892,7 @@ def vault_search(
             inp.context_lines,
             inp.include_archives,
         ),
+        path_prefix=inp.path_prefix,
     )
 
 
@@ -816,6 +932,7 @@ def vault_search_frontmatter(
             inp.max_results,
             inp.include_archives,
         ),
+        path_prefix=inp.path_prefix,
     )
 
 
@@ -1040,14 +1157,19 @@ def vault_context_route(
 ) -> str:
     """Return a body-free deterministic context route."""
     try:
-        return dumps(_route_context(
+        route = _route_context(
             request,
             frontmatter_index,
             reference_date=reference_date,
             start_date=start_date,
             end_date=end_date,
             include_archives=include_archives,
-        ))
+        )
+        policy_block = _profile_policy_block(
+            "vault_context_route",
+            paths=_routed_paths(route),
+        )
+        return policy_block if policy_block is not None else dumps(route)
     except ValueError as exc:
         return dumps({"error": str(exc)})
 
@@ -1074,6 +1196,20 @@ def vault_context_read(
 ) -> str:
     """Return bounded routed context with a complete selection receipt."""
     try:
+        route = _route_context(
+            request,
+            frontmatter_index,
+            reference_date=reference_date,
+            start_date=start_date,
+            end_date=end_date,
+            include_archives=include_archives,
+        )
+        policy_block = _profile_policy_block(
+            "vault_context_read",
+            paths=_routed_paths(route),
+        )
+        if policy_block is not None:
+            return policy_block
         return dumps(_read_context(
             request,
             frontmatter_index,
@@ -1106,6 +1242,19 @@ def vault_context_proposal(
 ) -> str:
     """Return a no-write proposal or an immediate-safety handoff."""
     try:
+        route = _route_context(
+            request,
+            frontmatter_index,
+            reference_date=reference_date,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        policy_block = _profile_policy_block(
+            "vault_context_proposal",
+            paths=_routed_paths(route),
+        )
+        if policy_block is not None:
+            return policy_block
         return dumps(_propose_context(
             request,
             frontmatter_index,
@@ -1234,6 +1383,12 @@ def vault_analytics_summary(
         required_frontmatter=required_frontmatter,
         max_examples=max_examples,
     )
+    policy_block = _profile_policy_block(
+        "vault_analytics_summary",
+        path_prefix=inp.path_prefix,
+    )
+    if policy_block is not None:
+        return policy_block
     return _vault_analytics_summary(inp.path_prefix or "", inp.required_frontmatter, inp.max_examples)
 
 
@@ -1259,6 +1414,12 @@ def vault_analytics_findings(
         required_frontmatter=required_frontmatter,
         max_results=max_results,
     )
+    policy_block = _profile_policy_block(
+        "vault_analytics_findings",
+        path_prefix=inp.path_prefix,
+    )
+    if policy_block is not None:
+        return policy_block
     return _vault_analytics_findings(
         inp.category,
         inp.path_prefix or "",

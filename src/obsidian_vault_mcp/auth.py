@@ -1,6 +1,7 @@
 """Bearer token authentication middleware for the vault MCP server."""
 
 import hmac
+import re
 import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -28,6 +29,7 @@ _AUTH_EXEMPT_PATHS = {
 _AUTH_EXEMPT_METHOD_PATHS = (
     {("GET", "/"), ("HEAD", "/")} if config.VAULT_MCP_PATH != "/" else set()
 )
+_PROFILE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def _www_authenticate(request: Request, error: str) -> str:
@@ -84,7 +86,19 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         # User-Agent-derived hint -- it becomes a true per-client id if the static bearer
         # token is ever replaced with per-client tokens.
         client = request.headers.get("user-agent", "").strip()[:200] or None
-        ctx_token = set_request_context(principal=token, request_id=uuid.uuid4().hex, client=client)
+        raw_profile = request.headers.get("x-dodo-profile", "").strip().casefold()
+        if raw_profile and not _PROFILE_PATTERN.fullmatch(raw_profile):
+            return JSONResponse(
+                {"error": "Invalid X-Dodo-Profile header"},
+                status_code=400,
+            )
+        profile = raw_profile or None
+        ctx_token = set_request_context(
+            principal=token,
+            request_id=uuid.uuid4().hex,
+            client=client,
+            profile=profile,
+        )
         try:
             return await call_next(request)
         finally:

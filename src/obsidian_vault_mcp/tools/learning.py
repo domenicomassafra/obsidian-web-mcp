@@ -26,6 +26,14 @@ class LearningToolError(RuntimeError):
     """Bounded error returned by the learning adapter."""
 
 
+_NOTEBOOKLM_CAPABILITIES = {
+    "available_tools": ["notebooklm_list", "notebooklm_ask"],
+    "artifact_generation": False,
+    "artifact_status": False,
+    "artifact_download": False,
+}
+
+
 def _resolve_vault_file(relative_path: str) -> Path:
     """Resolve one regular vault file without aliases or path traversal."""
     relative = Path(relative_path)
@@ -158,7 +166,7 @@ def _notebook_materials(relative_path: str) -> list[dict[str, Any]]:
             "notebook_url": notebook.get("notebook_url"),
             "review_state": review_state,
             "usable_as_current": review_state != "stale" and not drift,
-            "artifacts": [
+            "existing_registry_artifacts": [
                 {
                     "type": artifact.get("type"),
                     "title": artifact.get("title"),
@@ -203,6 +211,7 @@ def learning_get_today(
         "saved_is_not_learned": True,
         "notebook_artifacts_are_derived": True,
     }
+    payload["notebooklm_capabilities"] = dict(_NOTEBOOKLM_CAPABILITIES)
     return dumps(payload)
 
 
@@ -274,5 +283,6 @@ def learning_get_history(uid: str, target_date: str | None = None) -> str:
     payload["obsidian_path"] = relative
     payload["obsidian_uri"] = row.get("obsidian_uri", "")
     payload["notebook_materials"] = _notebook_materials(relative)
+    payload["notebooklm_capabilities"] = dict(_NOTEBOOKLM_CAPABILITIES)
     payload.setdefault("status", "pass")
     return dumps(payload)

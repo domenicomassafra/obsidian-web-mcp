@@ -7,6 +7,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from obsidian_vault_mcp import auth as auth_module
+from obsidian_vault_mcp.context import current_request_context
 
 
 @pytest.fixture
@@ -45,3 +46,38 @@ def test_valid_token_passes_through(client):
     assert r.status_code == 200
     assert r.text == "ok"
     assert "WWW-Authenticate" not in r.headers
+
+
+def test_owner_controlled_profile_header_reaches_tool_context(monkeypatch):
+    monkeypatch.setattr(auth_module, "VAULT_MCP_TOKEN", "secret-token")
+
+    async def show_profile(request):
+        return PlainTextResponse(current_request_context().get("profile") or "")
+
+    app = Starlette(routes=[Route("/", show_profile)])
+    app.add_middleware(auth_module.BearerAuthMiddleware)
+    scoped_client = TestClient(app)
+
+    response = scoped_client.get(
+        "/",
+        headers={
+            "Authorization": "Bearer secret-token",
+            "X-Dodo-Profile": "signorstudio",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.text == "signorstudio"
+
+
+def test_invalid_profile_header_fails_closed(client):
+    response = client.get(
+        "/",
+        headers={
+            "Authorization": "Bearer secret-token",
+            "X-Dodo-Profile": "../signorstudio",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid X-Dodo-Profile header"

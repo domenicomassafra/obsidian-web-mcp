@@ -17,10 +17,20 @@ from typing import Any
 _request_context: ContextVar[dict[str, Any] | None] = ContextVar("request_context", default=None)
 
 
-def set_request_context(principal: str | None, request_id: str | None, client: str | None) -> Token:
+def set_request_context(
+    principal: str | None,
+    request_id: str | None,
+    client: str | None,
+    profile: str | None = None,
+) -> Token:
     """Bind the audit context for the current request. Returns a reset token."""
     return _request_context.set(
-        {"principal": principal, "request_id": request_id, "client": client}
+        {
+            "principal": principal,
+            "request_id": request_id,
+            "client": client,
+            "profile": profile,
+        }
     )
 
 

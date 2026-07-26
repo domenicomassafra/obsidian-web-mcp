@@ -58,6 +58,18 @@ def test_today_is_read_only_and_stale_notebook_is_fail_closed(
     assert material["review_state"] == "stale"
     assert material["usable_as_current"] is False
     assert "content" not in material
+    assert payload["notebooklm_capabilities"] == {
+        "available_tools": ["notebooklm_list", "notebooklm_ask"],
+        "artifact_generation": False,
+        "artifact_status": False,
+        "artifact_download": False,
+    }
+    assert "artifacts" not in material
+    assert material["existing_registry_artifacts"] == [{
+        "type": "video",
+        "title": "Coding lesson",
+        "status": "completed",
+    }]
 
 
 def test_intent_and_review_use_stable_ids_without_second_scheduler(monkeypatch):
