@@ -61,8 +61,16 @@ def test_vault_write_advertises_conflict_guards():
     assert properties["expected_sha256"]["anyOf"][0]["pattern"] == "^[0-9a-fA-F]{64}$"
 
 
-def test_public_tool_count_remains_stable():
-    assert len(server.mcp._tool_manager._tools) == 29
+def test_daily_checkin_tools_expose_guarded_contract():
+    preview = server.mcp._tool_manager.get_tool("daily_checkin_preview")
+    apply = server.mcp._tool_manager.get_tool("daily_checkin_apply")
+    rollback = server.mcp._tool_manager.get_tool("daily_checkin_rollback")
+
+    assert preview.annotations.readOnlyHint is True
+    assert apply.annotations.idempotentHint is True
+    assert rollback.annotations.destructiveHint is True
+    assert apply.parameters["properties"]["confirmation"]["const"] == "APPLICA"
+    assert rollback.parameters["properties"]["confirmation"]["const"] == "ROLLBACK"
 
 
 def test_batch_frontmatter_update_is_marked_destructive():

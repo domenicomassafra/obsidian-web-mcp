@@ -59,6 +59,24 @@ def test_signor_studio_allows_learning_reads_and_writes(monkeypatch):
     assert calls and calls[0][0] == "intent"
 
 
+def test_signor_studio_denies_daily_checkin_before_external_access(monkeypatch):
+    def forbidden_call(**_kwargs):
+        raise AssertionError("Signal Deck must not be called")
+
+    monkeypatch.setattr(server, "_daily_checkin_preview", forbidden_call)
+    token = _as_signor_studio()
+    try:
+        result = _assert_denied(server.daily_checkin_preview(
+            "2026-07-27",
+            "packet5:signorstudio-denied",
+        ))
+    finally:
+        context.reset_request_context(token)
+
+    assert result["operation"] == "daily_checkin_preview"
+    assert result["access_executed"] is False
+
+
 def test_signor_studio_denies_direct_read_and_generic_write(vault_dir):
     knowledge = vault_dir / "05-knowledge"
     knowledge.mkdir()

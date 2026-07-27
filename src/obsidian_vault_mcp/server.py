@@ -193,6 +193,11 @@ from .tools.learning import (
     learning_record_review as _learning_record_review,
     learning_set_intent as _learning_set_intent,
 )
+from .tools.daily_checkin import (
+    apply_daily_checkin as _daily_checkin_apply,
+    preview_daily_checkin as _daily_checkin_preview,
+    rollback_daily_checkin as _daily_checkin_rollback,
+)
 from .models import (
     VaultReadInput,
     VaultWriteInput,
@@ -255,6 +260,11 @@ _PROFILE_BOUND_CONTEXT_OPERATIONS = frozenset({
     "vault_context_route",
     "vault_context_read",
     "vault_context_proposal",
+})
+_SIGNOR_STUDIO_EXTERNAL_WRITE_OPERATIONS = frozenset({
+    "daily_checkin_preview",
+    "daily_checkin_apply",
+    "daily_checkin_rollback",
 })
 _EXPLICIT_SCOPE_OPERATIONS = frozenset({
     "vault_search",
@@ -342,6 +352,11 @@ def _profile_policy_block(operation: str, **context) -> str | None:
         return _profile_policy_denial(
             operation,
             "Signor Studio must use explicitly scoped vault or learning tools",
+        )
+    if operation in _SIGNOR_STUDIO_EXTERNAL_WRITE_OPERATIONS:
+        return _profile_policy_denial(
+            operation,
+            "Signor Studio cannot mutate Notion through the Daily OS writer",
         )
 
     scope = context.get("path_prefix") or context.get("path")
@@ -1394,6 +1409,109 @@ def learning_get_history(
 
 
 @mcp.tool(
+    name="daily_checkin_preview",
+    description=(
+        "Prepare today's typed Daily Log operation through the single Signal Deck "
+        "writer. Returns a dry-run packet and performs no Notion mutation. Use the "
+        "same idempotency_key for preview, apply and cross-surface replay."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+def daily_checkin_preview(
+    date: Annotated[str, Field(min_length=10, max_length=10)],
+    idempotency_key: Annotated[
+        str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:-]+$")
+    ],
+    bedtime: Annotated[str, Field(max_length=5)] = "",
+    wake_time: Annotated[str, Field(max_length=5)] = "",
+    mood: Annotated[float | None, Field(ge=1, le=10)] = None,
+    morning_journal: Annotated[str, Field(max_length=850)] = "",
+    evening_journal: Annotated[str, Field(max_length=850)] = "",
+    provenance_source: Annotated[str, Field(min_length=1, max_length=160)] = "ordinary-chatgpt",
+) -> str:
+    policy_block = _profile_policy_block("daily_checkin_preview")
+    if policy_block is not None:
+        return policy_block
+    return dumps(_daily_checkin_preview(
+        date=date,
+        bedtime=bedtime,
+        wake_time=wake_time,
+        mood=mood,
+        morning_journal=morning_journal,
+        evening_journal=evening_journal,
+        idempotency_key=idempotency_key,
+        provenance_source=provenance_source,
+    ))
+
+
+@mcp.tool(
+    name="daily_checkin_apply",
+    description=(
+        "Apply an exact prior daily_checkin_preview through Signal Deck. Requires "
+        "the preview operation_id and packet_id plus explicit APPLICA. Signal Deck "
+        "owns Registry ordering, idempotency, post-fetch and rollback."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+def daily_checkin_apply(
+    date: Annotated[str, Field(min_length=10, max_length=10)],
+    idempotency_key: Annotated[
+        str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:-]+$")
+    ],
+    operation_id: Annotated[str, Field(min_length=1, max_length=80)],
+    packet_id: Annotated[str, Field(min_length=1, max_length=80)],
+    confirmation: Literal["APPLICA"],
+    bedtime: Annotated[str, Field(max_length=5)] = "",
+    wake_time: Annotated[str, Field(max_length=5)] = "",
+    mood: Annotated[float | None, Field(ge=1, le=10)] = None,
+    morning_journal: Annotated[str, Field(max_length=850)] = "",
+    evening_journal: Annotated[str, Field(max_length=850)] = "",
+    provenance_source: Annotated[str, Field(min_length=1, max_length=160)] = "ordinary-chatgpt",
+) -> str:
+    policy_block = _profile_policy_block("daily_checkin_apply")
+    if policy_block is not None:
+        return policy_block
+    return dumps(_daily_checkin_apply(
+        date=date,
+        bedtime=bedtime,
+        wake_time=wake_time,
+        mood=mood,
+        morning_journal=morning_journal,
+        evening_journal=evening_journal,
+        idempotency_key=idempotency_key,
+        provenance_source=provenance_source,
+        operation_id=operation_id,
+        packet_id=packet_id,
+        confirmation=confirmation,
+    ))
+
+
+@mcp.tool(
+    name="daily_checkin_rollback",
+    description=(
+        "Rollback one proven daily.checkin through the same Signal Deck receipt. "
+        "Requires the original operation_id, idempotency_key and explicit ROLLBACK."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True},
+)
+def daily_checkin_rollback(
+    operation_id: Annotated[str, Field(min_length=1, max_length=80)],
+    idempotency_key: Annotated[
+        str, Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:-]+$")
+    ],
+    confirmation: Literal["ROLLBACK"],
+) -> str:
+    policy_block = _profile_policy_block("daily_checkin_rollback")
+    if policy_block is not None:
+        return policy_block
+    return dumps(_daily_checkin_rollback(
+        operation_id=operation_id,
+        idempotency_key=idempotency_key,
+        confirmation=confirmation,
+    ))
+
+
+@mcp.tool(
     name="vault_analytics_summary",
     description=(
         "Return a compact analytics summary for vault hygiene, including frontmatter, link, tag, and encoding "
@@ -1477,6 +1595,9 @@ _CONTEXT_PROFILE_TOOLS = frozenset({
     "learning_set_intent",
     "learning_record_review",
     "learning_get_history",
+    "daily_checkin_preview",
+    "daily_checkin_apply",
+    "daily_checkin_rollback",
 })
 
 

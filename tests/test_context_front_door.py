@@ -282,8 +282,11 @@ def test_context_profile_is_small_and_keeps_compatibility_implementation():
         "learning_set_intent",
         "learning_record_review",
         "learning_get_history",
+        "daily_checkin_preview",
+        "daily_checkin_apply",
+        "daily_checkin_rollback",
     }
-    assert len(names) == 19
+    assert len(names) == 22
     # The implementation remains registered in the stock/full profile; the runtime
     # profile only removes public exposure after extensions register.
     assert server.mcp._tool_manager.get_tool("vault_canvas_read") is not None
