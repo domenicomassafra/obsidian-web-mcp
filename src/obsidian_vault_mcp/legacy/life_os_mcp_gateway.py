@@ -779,6 +779,66 @@ def tool_append_daily_log(arguments: dict[str, Any], source: str) -> dict[str, A
     return run_router(text, router_kind, source, None, None)
 
 
+def tool_daily_dual_surface_plan(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Run the vault-owned zero-write planner and reject any unsafe receipt."""
+    relative = Path("00-system/tools/life_os_daily_report.py")
+    current = ROOT
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise JsonRpcError(-32603, "canonical daily planner path contains a symlink")
+    try:
+        script = current.resolve(strict=True)
+        root = ROOT.resolve(strict=True)
+    except OSError as exc:
+        raise JsonRpcError(-32603, "canonical daily planner is unavailable") from exc
+    if root not in script.parents or not script.is_file():
+        raise JsonRpcError(-32603, "canonical daily planner is outside the vault")
+
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--vault",
+                str(root),
+                "--daily-loop-plan",
+                "-",
+            ],
+            cwd=str(root),
+            input=json.dumps(arguments, ensure_ascii=True),
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise JsonRpcError(-32603, "canonical daily planner timed out") from exc
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise JsonRpcError(-32603, "canonical daily planner returned invalid JSON") from exc
+    if completed.returncode != 0 or not isinstance(payload, dict):
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        raise JsonRpcError(-32602, str(reason or "daily planner input was rejected")[:500])
+
+    boundaries = payload.get("boundaries")
+    zero_write = {
+        "vault_writes": 0,
+        "notion_live_writes": 0,
+        "queue_writes": 0,
+        "network_calls": 0,
+    }
+    if (
+        payload.get("status") != "planned"
+        or payload.get("dry_run") is not True
+        or not isinstance(boundaries, dict)
+        or any(boundaries.get(key) != value for key, value in zero_write.items())
+    ):
+        raise JsonRpcError(-32603, "canonical daily planner returned an unsafe receipt")
+    return payload
+
+
 def tool_calendar_queue_event(arguments: dict[str, Any], source: str) -> dict[str, Any]:
     title = str(arguments.get("title", "")).strip()
     when = str(arguments.get("when", "")).strip()
@@ -860,6 +920,8 @@ def dispatch_tool(name: str, arguments: dict[str, Any], poke_user_id: str | None
         return tool_create_content_idea(arguments, source)
     if name == "notion_log_daily_metric":
         return tool_append_daily_log(arguments, source)
+    if name == "lifeos_daily_dual_surface_plan":
+        return tool_daily_dual_surface_plan(arguments)
     if name == "calendar_queue_event":
         return tool_calendar_queue_event(arguments, source)
     if name == "project_get_brief":

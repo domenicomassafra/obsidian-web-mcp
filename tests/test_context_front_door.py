@@ -8,7 +8,12 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+from mcp.server.fastmcp import FastMCP
+
 from obsidian_vault_mcp import config, server
+from obsidian_vault_mcp.legacy import life_os_mcp_gateway as legacy_gateway
+from obsidian_vault_mcp.legacy.extension import LegacyLifeOsExtension
 from obsidian_vault_mcp.tools import search as search_module
 from obsidian_vault_mcp.context_engine import bootstrap_status, clear_bootstrap_cache
 from obsidian_vault_mcp.tools.daily import vault_daily_note_read_range
@@ -285,11 +290,81 @@ def test_context_profile_is_small_and_keeps_compatibility_implementation():
         "daily_checkin_preview",
         "daily_checkin_apply",
         "daily_checkin_rollback",
+        "lifeos_daily_dual_surface_plan",
     }
-    assert len(names) == 22
+    assert len(names) == 23
     # The implementation remains registered in the stock/full profile; the runtime
     # profile only removes public exposure after extensions register.
     assert server.mcp._tool_manager.get_tool("vault_canvas_read") is not None
+
+
+def test_daily_dual_surface_adapter_is_bounded_zero_write_and_fail_closed(
+    tmp_path, monkeypatch
+):
+    script = tmp_path / "00-system/tools/life_os_daily_report.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        """
+import json
+import sys
+
+arguments = json.load(sys.stdin)
+unsafe = arguments["phase"] == "evening"
+print(json.dumps({
+    "status": "planned",
+    "dry_run": True,
+    "phase": arguments["phase"],
+    "date": arguments["date"],
+    "boundaries": {
+        "vault_writes": 1 if unsafe else 0,
+        "notion_live_writes": 0,
+        "queue_writes": 0,
+        "network_calls": 0,
+    },
+}))
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(legacy_gateway, "ROOT", tmp_path)
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    result = legacy_gateway.tool_daily_dual_surface_plan(
+        {"phase": "morning", "date": "2026-07-29", "top_actions": ["Fixture"]}
+    )
+
+    assert result["status"] == "planned"
+    assert result["dry_run"] is True
+    assert result["boundaries"]["vault_writes"] == 0
+    assert {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    } == before
+    with pytest.raises(legacy_gateway.JsonRpcError, match="unsafe receipt"):
+        legacy_gateway.tool_daily_dual_surface_plan(
+            {"phase": "evening", "date": "2026-07-29"}
+        )
+
+
+def test_daily_dual_surface_public_schema_is_read_only_and_bounded():
+    planner_mcp = FastMCP("daily-plan-contract")
+    LegacyLifeOsExtension().register_tools(planner_mcp)
+    planner = planner_mcp._tool_manager.get_tool("lifeos_daily_dual_surface_plan")
+
+    assert planner.annotations.readOnlyHint is True
+    assert planner.annotations.destructiveHint is False
+    assert planner.annotations.idempotentHint is True
+    assert planner.annotations.openWorldHint is False
+    properties = planner.parameters["properties"]
+    assert properties["phase"]["enum"] == ["morning", "evening"]
+    assert properties["date"]["pattern"] == r"^\d{4}-\d{2}-\d{2}$"
+    assert properties["top_actions"]["anyOf"][0]["maxItems"] == 3
+    assert properties["tomorrow_actions"]["anyOf"][0]["maxItems"] == 3
+    assert properties["metrics"]["anyOf"][0]["maxItems"] == 20
 
 
 def test_public_schemas_declare_archive_date_and_budget_limits():

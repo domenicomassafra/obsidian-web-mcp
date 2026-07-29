@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
 
 from ..extensions import Extension
 from . import life_os_mcp_gateway as legacy
@@ -32,10 +34,11 @@ def _call(name: str, arguments: dict[str, Any]) -> str:
 
 
 class LegacyLifeOsExtension(Extension):
-    """Expose the proven 13-tool Poke/Life OS contract in the Obsidian MCP app.
+    """Expose the proven Life OS adapter inside the Obsidian MCP app.
 
-    The old HTTP gateway is not started. Compatibility calls share this process,
-    bearer auth, audit boundary, vault root, and proposal-only write mode.
+    The old HTTP gateway is not started. Its 13 historical compatibility calls
+    plus the public zero-write daily planner share this process, bearer auth,
+    audit boundary, vault root, and proposal-only write mode.
     """
 
     def register_tools(self, mcp) -> None:
@@ -91,6 +94,17 @@ class LegacyLifeOsExtension(Extension):
             self.notion_log_daily_metric,
             name="notion_log_daily_metric",
             description="Return a proposal-only daily metric route; no write is executed.",
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        )
+        mcp.add_tool(
+            self.lifeos_daily_dual_surface_plan,
+            name="lifeos_daily_dual_surface_plan",
+            description=(
+                "Build a zero-write morning or evening plan shared by ordinary "
+                "ChatGPT and Hermes. It proposes at most three Action Items, "
+                "Daily Log metrics and an optional canonical Obsidian narrative "
+                "without queueing, creating or updating anything."
+            ),
             annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         )
         mcp.add_tool(
@@ -192,6 +206,28 @@ class LegacyLifeOsExtension(Extension):
     ) -> str:
         return _call("notion_log_daily_metric", {"kind": kind, "value": value, "date": date, "note": note})
 
+    def lifeos_daily_dual_surface_plan(
+        self,
+        phase: Literal["morning", "evening"],
+        date: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")],
+        top_actions: Annotated[list[str | dict[str, Any]] | None, Field(max_length=3)] = None,
+        tomorrow_actions: Annotated[list[str | dict[str, Any]] | None, Field(max_length=3)] = None,
+        metrics: Annotated[list[dict[str, Any]] | None, Field(max_length=20)] = None,
+        narrative: dict[str, str | list[str]] | None = None,
+    ) -> str:
+        arguments = {
+            "phase": phase,
+            "date": date,
+            "top_actions": top_actions,
+            "tomorrow_actions": tomorrow_actions,
+            "metrics": metrics,
+            "narrative": narrative,
+        }
+        return _call(
+            "lifeos_daily_dual_surface_plan",
+            {key: value for key, value in arguments.items() if value is not None},
+        )
+
     def calendar_queue_event(
         self,
         title: str,
@@ -221,4 +257,3 @@ class LegacyLifeOsExtension(Extension):
         limit: int = 20,
     ) -> str:
         return _call("agent_review_errors", {"status": status, "limit": limit})
-

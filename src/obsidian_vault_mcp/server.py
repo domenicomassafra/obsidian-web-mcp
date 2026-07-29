@@ -1598,6 +1598,7 @@ _CONTEXT_PROFILE_TOOLS = frozenset({
     "daily_checkin_preview",
     "daily_checkin_apply",
     "daily_checkin_rollback",
+    "lifeos_daily_dual_surface_plan",
 })
 
 
