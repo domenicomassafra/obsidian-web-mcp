@@ -45,6 +45,12 @@ def _seed_context_fixture(vault: Path) -> None:
         "# Areas\nResolve entity, then Area, then capability from each Area hub.\n",
     )
     _write(vault, ".agents/skills/lifeos/SKILL.md", "# Life OS skill\nRead-only policy helper.\n")
+    _write(vault, ".agents/skills/lifeos/LOCAL_ONLY.md", "local-only instruction\n")
+    _write(
+        vault,
+        ".agents/skills/unprojected/SKILL.md",
+        "---\nstatus: hidden-unprojected\n---\nunprojected skill\n",
+    )
     _write(vault, ".agents/THIRD_PARTY_NOTICES.md", "# Notices\nSynthetic fixture.\n")
     _write(vault, ".agents/runtime.json", '{"secret": "blocked"}')
     _write(vault, ".agents/runtime.md", "---\nstatus: hidden-runtime\n---\nblocked runtime token\n")
@@ -125,10 +131,24 @@ def test_hidden_read_allowlist_is_narrow_and_write_protected(vault_dir):
 
     assert "error" not in _json(vault_read(".agents/skills/lifeos/SKILL.md"))
     assert "error" not in _json(vault_read(".agents/THIRD_PARTY_NOTICES.md"))
+    assert "error" in _json(vault_read(".agents/skills/lifeos/LOCAL_ONLY.md"))
+    assert "error" in _json(vault_read(".agents/skills/unprojected/SKILL.md"))
+    assert "error" in _json(server.vault_list(".agents/skills"))
     assert "error" in _json(vault_read(".agents/runtime.json"))
     assert "error" in _json(vault_read(".env"))
     assert "error" in _json(vault_read(".obsidian/config.json"))
     assert "error" in _json(vault_write(".agents/skills/lifeos/WRITE.md", "blocked"))
+
+
+def test_hidden_skill_projection_stays_out_of_search_and_index(vault_dir, monkeypatch):
+    _seed_context_fixture(vault_dir)
+    monkeypatch.setattr(search_module.shutil, "which", lambda _name: None)
+
+    assert _json(vault_search("unprojected skill"))["results"] == []
+    server.frontmatter_index.rebuild()
+    assert _json(
+        vault_search_frontmatter("status", "hidden-unprojected", include_archives=True)
+    )["results"] == []
 
 
 def test_hidden_runtime_stays_blocked_in_python_search_and_frontmatter_index(

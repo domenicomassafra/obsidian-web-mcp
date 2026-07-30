@@ -12,11 +12,21 @@ from . import config
 
 
 ARCHIVE_PATTERNS = ("09-archive/**", "**/archive/**")
-_HIDDEN_READ_FILES = {
+_PROJECTED_HIDDEN_READ_PATHS = frozenset({
     ".agents/NOTICE.md",
     ".agents/NOTICES.md",
     ".agents/THIRD_PARTY_NOTICES.md",
-}
+    ".agents/skills/json-canvas/SKILL.md",
+    ".agents/skills/lifeos-daily/SKILL.md",
+    ".agents/skills/lifeos-harvest/SKILL.md",
+    ".agents/skills/lifeos-media/SKILL.md",
+    ".agents/skills/lifeos-notion/SKILL.md",
+    ".agents/skills/lifeos-wiki/SKILL.md",
+    ".agents/skills/lifeos/SKILL.md",
+    ".agents/skills/obsidian-bases/SKILL.md",
+    ".agents/skills/obsidian-cli/SKILL.md",
+    ".agents/skills/obsidian-markdown/SKILL.md",
+})
 
 
 def _clean_relative_path(relative_path: str) -> str:
@@ -39,14 +49,9 @@ def archive_policy_receipt(include_archives: bool) -> dict:
 
 
 def is_hidden_read_allowed(relative_path: str) -> bool:
-    """Allow only published skill files and notices beneath the hidden agent tree."""
+    """Allow only exact projected hidden files; never a hidden directory tree."""
     normalized = _clean_relative_path(relative_path).strip("/")
-    parts = Path(normalized).parts
-    if normalized in _HIDDEN_READ_FILES:
-        return True
-    if len(parts) >= 2 and parts[:2] == (".agents", "skills"):
-        return not any(part.startswith(".") for part in parts[2:])
-    return False
+    return normalized in _PROJECTED_HIDDEN_READ_PATHS
 
 
 def resolve_vault_path(relative_path: str, *, allow_hidden_read: bool = False) -> Path:
