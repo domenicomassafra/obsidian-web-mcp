@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 from mcp.server.fastmcp import FastMCP
@@ -17,7 +18,7 @@ from obsidian_vault_mcp.legacy.extension import LegacyLifeOsExtension
 from obsidian_vault_mcp.tools import search as search_module
 from obsidian_vault_mcp.context_engine import bootstrap_status, clear_bootstrap_cache
 from obsidian_vault_mcp.tools.daily import vault_daily_note_read_range
-from obsidian_vault_mcp.tools.read import vault_read
+from obsidian_vault_mcp.tools.read import vault_batch_read, vault_read
 from obsidian_vault_mcp.tools.search import vault_search, vault_search_frontmatter
 from obsidian_vault_mcp.tools.write import vault_write
 
@@ -54,6 +55,20 @@ def _seed_context_fixture(vault: Path) -> None:
     _write(vault, ".agents/THIRD_PARTY_NOTICES.md", "# Notices\nSynthetic fixture.\n")
     _write(vault, ".agents/runtime.json", '{"secret": "blocked"}')
     _write(vault, ".agents/runtime.md", "---\nstatus: hidden-runtime\n---\nblocked runtime token\n")
+    _write(vault, ".agents\\skills\\lifeos\\SKILL.md", "literal backslash alias\n")
+    _write(vault, "05-knowledge/hidden-file-target.md", "hidden file symlink needle\n")
+    _write(
+        vault,
+        "05-knowledge/hidden-directory-target/SKILL.md",
+        "hidden directory symlink needle\n",
+    )
+    (vault / ".agents/skills/lifeos-daily").mkdir(parents=True, exist_ok=True)
+    (vault / ".agents/skills/lifeos-daily/SKILL.md").symlink_to(
+        vault / "05-knowledge/hidden-file-target.md"
+    )
+    (vault / ".agents/skills/lifeos-media").symlink_to(
+        vault / "05-knowledge/hidden-directory-target", target_is_directory=True
+    )
     _write(vault, ".env", "FIXTURE_SECRET=blocked\n")
 
     for path, title in (
@@ -138,6 +153,44 @@ def test_hidden_read_allowlist_is_narrow_and_write_protected(vault_dir):
     assert "error" in _json(vault_read(".env"))
     assert "error" in _json(vault_read(".obsidian/config.json"))
     assert "error" in _json(vault_write(".agents/skills/lifeos/WRITE.md", "blocked"))
+
+
+def test_hidden_projection_binds_authorization_to_the_exact_vault_object(
+    vault_dir, monkeypatch
+):
+    _seed_context_fixture(vault_dir)
+
+    canonical = ".agents/skills/lifeos/SKILL.md"
+    file_alias = ".agents/skills/lifeos-daily/SKILL.md"
+    directory_alias = ".agents/skills/lifeos-media/SKILL.md"
+    backslash_alias = ".agents\\skills\\lifeos\\SKILL.md"
+
+    assert "error" not in _json(vault_read(canonical))
+    for alias in (file_alias, directory_alias, backslash_alias):
+        assert "error" in _json(vault_read(alias))
+
+    batch = _json(vault_batch_read([canonical, file_alias, directory_alias, backslash_alias]))
+    assert batch["found"] == 1
+    assert batch["missing"] == 3
+    assert batch["files"][0]["path"] == canonical
+    assert all("error" in item for item in batch["files"][1:])
+    assert "error" in _json(server.vault_list(".agents/skills/lifeos-media"))
+
+    rg_match = json.dumps({
+        "type": "match",
+        "data": {
+            "path": {"text": str(vault_dir / file_alias)},
+            "line_number": 1,
+            "lines": {"text": "hidden file symlink needle\\n"},
+        },
+    })
+    monkeypatch.setattr(search_module.shutil, "which", lambda _name: "rg")
+    monkeypatch.setattr(
+        search_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=rg_match),
+    )
+    assert _json(vault_search("hidden file symlink needle"))["results"] == []
 
 
 def test_hidden_skill_projection_stays_out_of_search_and_index(vault_dir, monkeypatch):

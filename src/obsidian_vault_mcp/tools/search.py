@@ -67,9 +67,11 @@ def _search_ripgrep(
 
         if data.get("type") == "match":
             match_data = data["data"]
-            file_path = match_data["path"]["text"]
+            file_path = Path(match_data["path"]["text"])
+            if not is_discoverable_vault_path(file_path, allow_hidden_read=True):
+                continue
             try:
-                rel_path = str(Path(file_path).relative_to(config.VAULT_PATH))
+                rel_path = str(file_path.relative_to(config.VAULT_PATH))
             except ValueError:
                 continue
             if is_archive_path(rel_path) and not include_archives:

@@ -50,8 +50,13 @@ def archive_policy_receipt(include_archives: bool) -> dict:
 
 def is_hidden_read_allowed(relative_path: str) -> bool:
     """Allow only exact projected hidden files; never a hidden directory tree."""
-    normalized = _clean_relative_path(relative_path).strip("/")
-    return normalized in _PROJECTED_HIDDEN_READ_PATHS
+    raw_path = str(relative_path)
+    normalized = _clean_relative_path(raw_path).strip("/")
+    # The allowlist is a publication contract, not a path-normalization
+    # shortcut.  Accept only the canonical spelling that is actually named in
+    # that contract, so backslashes, ``./`` prefixes and other aliases cannot
+    # inherit authorization from an allowed target.
+    return raw_path == normalized and normalized in _PROJECTED_HIDDEN_READ_PATHS
 
 
 def resolve_vault_path(relative_path: str, *, allow_hidden_read: bool = False) -> Path:
@@ -73,11 +78,18 @@ def resolve_vault_path(relative_path: str, *, allow_hidden_read: bool = False) -
                 f"Path component '{part}' starts with '.'; dotfiles and hidden directories are not allowed"
             )
 
-    resolved = (config.VAULT_PATH / relative_path).resolve()
     vault_root = config.VAULT_PATH.resolve()
+    lexical = vault_root / relative_path
+    resolved = lexical.resolve()
 
     if not str(resolved).startswith(str(vault_root) + os.sep) and resolved != vault_root:
         raise ValueError("Path resolves outside the vault root")
+
+    # A projected hidden read must address the published object itself.  Do
+    # not follow an internal symlink or other alias to a different object,
+    # even when that object remains inside the vault.
+    if hidden_allowed and resolved != lexical:
+        raise ValueError("Projected hidden path must not resolve through an alias")
 
     return resolved
 
