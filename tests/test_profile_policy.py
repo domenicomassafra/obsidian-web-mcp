@@ -35,6 +35,21 @@ def test_signor_studio_allows_learning_reads_and_writes(monkeypatch):
     )
     monkeypatch.setattr(
         server,
+        "_learning_study_trace",
+        lambda *_args: json.dumps({
+            "status": "pass",
+            "boundaries": {"writes_performed": 0},
+        }),
+    )
+    monkeypatch.setattr(
+        server,
+        "_learning_get_history",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("raw history must not be exposed to Signor Studio")
+        ),
+    )
+    monkeypatch.setattr(
+        server,
         "_learning_set_intent",
         lambda *args: calls.append(("intent", args)) or json.dumps(
             {"status": "applied", "event_id": "intent-1"}
@@ -44,6 +59,9 @@ def test_signor_studio_allows_learning_reads_and_writes(monkeypatch):
     token = _as_signor_studio()
     try:
         today = json.loads(server.learning_get_today())
+        trace = json.loads(server.learning_get_history(
+            "knowledge-coding", "2026-09-12"
+        ))
         intent = json.loads(server.learning_set_intent(
             "knowledge-coding",
             "study",
@@ -55,6 +73,8 @@ def test_signor_studio_allows_learning_reads_and_writes(monkeypatch):
         context.reset_request_context(token)
 
     assert today["status"] == "pass"
+    assert trace["status"] == "pass"
+    assert trace["boundaries"]["writes_performed"] == 0
     assert intent["status"] == "applied"
     assert calls and calls[0][0] == "intent"
 

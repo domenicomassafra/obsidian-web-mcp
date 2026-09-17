@@ -190,6 +190,7 @@ from .tools.learning import (
     learning_event_path as _learning_event_path,
     learning_get_history as _learning_get_history,
     learning_get_today as _learning_get_today,
+    learning_study_trace as _learning_study_trace,
     learning_record_review as _learning_record_review,
     learning_set_intent as _learning_set_intent,
 )
@@ -1401,9 +1402,15 @@ def learning_get_history(
     uid: Annotated[str, Field(min_length=1, max_length=200)],
     date: str | None = None,
 ) -> str:
+    profile = current_request_context().get("profile")
+    implementation = (
+        _learning_study_trace
+        if profile == _SIGNOR_STUDIO_PROFILE
+        else _learning_get_history
+    )
     return _run_audited(
         "learning_get_history",
-        lambda: _learning_get_history(uid, date),
+        lambda: implementation(uid, date),
         path="00-system/learning-state.json",
     )
 

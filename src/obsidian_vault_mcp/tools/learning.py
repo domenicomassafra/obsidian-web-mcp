@@ -269,6 +269,24 @@ def learning_record_review(
     return dumps(payload)
 
 
+def learning_study_trace(uid: str, target_date: str | None = None) -> str:
+    """Return the body-free adaptive-plan trace for one attributable review."""
+    command = ["trace", "--uid", uid]
+    if target_date:
+        command.extend(["--date", target_date])
+    try:
+        payload = _run_learning(command)
+    except LearningToolError as exc:
+        return dumps({"status": "error", "error": str(exc), "write_executed": False})
+    payload.setdefault("status", "pass")
+    payload.setdefault("boundaries", {})
+    payload["boundaries"].update({
+        "mcp_write_executed": False,
+        "adapter_storage_created": False,
+    })
+    return dumps(payload)
+
+
 def learning_get_history(uid: str, target_date: str | None = None) -> str:
     command = ["history", "--uid", uid]
     if target_date:

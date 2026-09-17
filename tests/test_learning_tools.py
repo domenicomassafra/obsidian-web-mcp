@@ -103,6 +103,39 @@ def test_intent_and_review_use_stable_ids_without_second_scheduler(monkeypatch):
     assert blocked["write_executed"] is False
 
 
+def test_study_trace_is_read_only_body_free_and_uses_canonical_cli(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(arguments):
+        calls.append(arguments)
+        return {
+            "status": "pass",
+            "uid": "knowledge-coding",
+            "evidence": {"event_id": "review-1"},
+            "weekly_plan": {"selected": {"priority": "review_this_week"}},
+            "daily_checkin": {"changes": [{"kind": "priority_change"}]},
+            "boundaries": {
+                "body_fields_included": False,
+                "recall_text_included": False,
+                "writes_performed": 0,
+            },
+        }
+
+    monkeypatch.setattr(learning, "_run_learning", fake_run)
+    payload = json.loads(learning.learning_study_trace(
+        "knowledge-coding", "2026-09-12"
+    ))
+    assert calls == [[
+        "trace", "--uid", "knowledge-coding", "--date", "2026-09-12"
+    ]]
+    assert payload["status"] == "pass"
+    assert payload["boundaries"]["mcp_write_executed"] is False
+    assert payload["boundaries"]["adapter_storage_created"] is False
+    assert payload["boundaries"]["recall_text_included"] is False
+    assert "recall_text" not in payload
+    assert "recall_text" not in payload.get("evidence", {})
+
+
 def test_public_learning_schemas_are_narrow_and_uniform():
     today = server.mcp._tool_manager.get_tool("learning_get_today").parameters
     assert set(today["properties"]["surface"]["enum"]) == {"knowledge", "media"}
