@@ -820,7 +820,10 @@ def vault_write_binary(path: str, data: str, media_type: str, overwrite: bool = 
     description=(
         "Patch an existing vault file with exact text replacements. Use this for token-efficient partial edits "
         "when only small fragments change; mutation.preflight is mandatory before a real write. "
-        "Supports dry-run diff previews and avoids resending the full file."
+        "Supports dry-run diff previews and avoids resending the full file. "
+        "Each edit is an object {old_text, new_text}; old_text must match exactly once. Edits apply in order, "
+        "and dry_run simulates that same in-order apply (each old_text is matched against the running document "
+        "the earlier edits produce), so its diff and match counts predict the real apply, including chained edits."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )

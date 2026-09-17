@@ -16,6 +16,7 @@ from ..vault import (
     is_discoverable_vault_path,
     is_hidden_read_allowed,
     resolve_vault_path,
+    resolve_vault_read_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,6 @@ def _search_ripgrep(
         return []
 
     matches = []
-    current_match = None
 
     for line in result.stdout.splitlines():
         try:
@@ -72,7 +72,10 @@ def _search_ripgrep(
                 continue
             try:
                 rel_path = str(file_path.relative_to(config.VAULT_PATH))
-            except ValueError:
+                # rg has already read the bytes. A refusal must discard its match,
+                # not fall back to the line in the JSON event.
+                resolve_vault_read_path(rel_path, allow_hidden_read=True)
+            except (ValueError, OSError):
                 continue
             if is_archive_path(rel_path) and not include_archives:
                 continue
@@ -127,8 +130,10 @@ def _search_python(
             continue
 
         try:
-            content = file_path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, PermissionError):
+            rel_path = str(file_path.relative_to(config.VAULT_PATH))
+            safe_path = resolve_vault_read_path(rel_path, allow_hidden_read=True)
+            content = safe_path.read_text(encoding="utf-8")
+        except (ValueError, OSError):
             continue
 
         lines = content.splitlines()
@@ -153,7 +158,9 @@ def _search_python(
 def _get_frontmatter_excerpt(file_path: Path, max_keys: int = 3) -> dict | None:
     """Read frontmatter from a file, returning first N key-value pairs."""
     try:
-        content = file_path.read_text(encoding="utf-8")
+        rel_path = str(file_path.relative_to(config.VAULT_PATH))
+        safe_path = resolve_vault_read_path(rel_path, allow_hidden_read=True)
+        content = safe_path.read_text(encoding="utf-8")
         post = frontmatter.loads(content)
         if not post.metadata:
             return None
