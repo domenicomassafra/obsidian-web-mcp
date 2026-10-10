@@ -1778,6 +1778,15 @@ def serve(extensions=()):
     if not VAULT_MCP_TOKEN:
         logger.warning("VAULT_MCP_TOKEN is not set -- auth will reject all requests")
 
+    # Open before serving: import existing registrations and fail closed on I/O errors.
+    from .oauth import close_oauth_state, get_oauth_state
+    try:
+        get_oauth_state()
+    except Exception as e:
+        logger.error(f"Could not open the OAuth state: {e}")
+        sys.exit(1)
+    atexit.register(close_oauth_state)
+
     # Fail CLOSED on a misconfigured audit log: if auditing is requested but the log path
     # is not writable, refuse to start rather than silently dropping mutation records.
     if audit_enabled() and not audit_path_writable():

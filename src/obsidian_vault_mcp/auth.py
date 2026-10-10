@@ -11,6 +11,8 @@ from starlette.responses import JSONResponse
 from . import config
 from .config import VAULT_MCP_SIGNORSTUDIO_TOKEN, VAULT_MCP_TOKEN
 from .context import reset_request_context, set_request_context
+from .oauth import canonical_resource, get_oauth_state, resource_matches
+from .oauth_state import TokenMetadata
 
 # Paths that don't require bearer auth (OAuth flow + health)
 _AUTH_EXEMPT_PATHS = {
@@ -49,6 +51,14 @@ def _www_authenticate(request: Request, error: str) -> str:
     return f'Bearer realm="mcp", resource_metadata="{resource_metadata}", error="{error}"'
 
 
+def _per_client_token(request: Request, token: str) -> TokenMetadata | None:
+    """A usable per-client OAuth token issued for this MCP endpoint, otherwise None."""
+    issued = get_oauth_state().lookup_access_token(token)
+    if issued is None or not resource_matches(issued.resource, canonical_resource(request)):
+        return None
+    return issued
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Validates Bearer tokens on all requests except OAuth and health endpoints."""
 
@@ -79,16 +89,17 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             )
 
         token = auth_header[7:]
-        owner_match = hmac.compare_digest(token, VAULT_MCP_TOKEN)
+        owner_match = hmac.compare_digest(token.encode(), VAULT_MCP_TOKEN.encode())
         signor_studio_match = bool(VAULT_MCP_SIGNORSTUDIO_TOKEN) and hmac.compare_digest(
-            token, VAULT_MCP_SIGNORSTUDIO_TOKEN
+            token.encode(), VAULT_MCP_SIGNORSTUDIO_TOKEN.encode()
         )
         if owner_match and signor_studio_match:
             return JSONResponse(
                 {"error": "Server misconfigured: profile tokens must be distinct"},
                 status_code=500,
             )
-        if not owner_match and not signor_studio_match:
+        issued = None if owner_match or signor_studio_match else _per_client_token(request, token)
+        if not owner_match and not signor_studio_match and issued is None:
             return JSONResponse(
                 {"error": "Invalid token"},
                 status_code=401,
@@ -100,7 +111,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         bound_profile = (
             _SIGNOR_STUDIO_PROFILE if signor_studio_match else _OWNER_PROFILE
         )
-        client = request.headers.get("user-agent", "").strip()[:200] or None
+        client = issued.client_id if issued else (request.headers.get("user-agent", "").strip()[:200] or None)
         raw_profile = request.headers.get("x-dodo-profile", "").strip().casefold()
         if raw_profile and not _PROFILE_PATTERN.fullmatch(raw_profile):
             return JSONResponse(
