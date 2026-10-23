@@ -147,8 +147,9 @@ Generate secrets with: `python -c "import secrets; print(secrets.token_hex(32))"
 
 ## OAuth clients and tokens
 
-Authorization and discovery identify this server as `Obsidian Vault`.
-Token handling reuses upstream #108
+Set `VAULT_OAUTH_RESOURCE_NAME` to label the authorization page and OAuth discovery
+for a non-vault consumer (default: `Obsidian Vault`). The two-host connector sets
+it to `Computer (Studio e MiniPC)`. Token handling reuses upstream #108
 (`ce39d2096dfa5343219c37003f617a1356faa64f`, MIT); the owner fork retains its
 profile-bound bearer authentication and enforced tool rate limits.
 

@@ -1,4 +1,4 @@
-"""Vault OAuth refresh survives restart and respects live revocation."""
+"""Regression for ControlCenter #468, through OAuth and bearer middleware."""
 import base64
 import hashlib
 from urllib.parse import parse_qs, urlsplit
@@ -16,14 +16,14 @@ def test_refresh_without_login_survives_restart_and_revocation(monkeypatch, tmp_
     monkeypatch.setattr(config, "VAULT_OAUTH_PASSWORD", "test-password")
     monkeypatch.setattr(config, "VAULT_MCP_TOKEN", "master")
     monkeypatch.setattr(auth, "VAULT_MCP_TOKEN", "master")
-    monkeypatch.setattr(config, "VAULT_MCP_PUBLIC_URL", "https://obsidian.example")
+    monkeypatch.setattr(config, "VAULT_MCP_PUBLIC_URL", "https://computer.example")
     monkeypatch.setattr(config, "VAULT_MCP_PATH", "/mcp")
     async def protected(request):
-        return PlainTextResponse("obsidian")
+        return PlainTextResponse("computer")
     app = Starlette(routes=[*oauth.oauth_routes, Route("/mcp", protected)])
     app.add_middleware(auth.BearerAuthMiddleware)
     with TestClient(app) as client:
-        redirect = "https://claude.example/callback"
+        redirect = "https://chatgpt.example/callback"
         cid = client.post("/oauth/register", json={"redirect_uris": [redirect]}).json()["client_id"]
         verifier = "a" * 64
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()

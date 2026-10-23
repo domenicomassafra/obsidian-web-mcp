@@ -52,7 +52,6 @@ from . import config
 from .oauth_state import InvalidClient, InvalidGrant, InvalidTarget, IssuedToken, OAuthState, _storable
 
 logger = logging.getLogger(__name__)
-_RESOURCE_NAME = "Obsidian Vault"
 
 # In-memory store for authorization codes (short-lived).
 # Maps code -> {client_id, redirect_uri, code_challenge, code_challenge_method, resource,
@@ -230,7 +229,7 @@ def _login_form(params: dict, error: str = "", status: int | None = None, header
         status = 401 if error else 200
     page = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Authorize {_RESOURCE_NAME} access</title>
+<title>Authorize {html.escape(config.VAULT_OAUTH_RESOURCE_NAME)} access</title>
 <style>
  body{{font-family:-apple-system,system-ui,sans-serif;background:#1e1e2e;color:#cdd6f4;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}
  form{{background:#313244;padding:2rem;border-radius:12px;width:300px;box-shadow:0 8px 24px rgba(0,0,0,.4)}}
@@ -243,7 +242,7 @@ def _login_form(params: dict, error: str = "", status: int | None = None, header
 </style></head>
 <body>
  <form method="post" action="/oauth/authorize">
-  <h1>🔒 Authorize {_RESOURCE_NAME}</h1>
+  <h1>🔒 Authorize {html.escape(config.VAULT_OAUTH_RESOURCE_NAME)}</h1>
   {hidden}
   <label for="u">Username</label>
   <input id="u" type="text" name="username" autocomplete="username" autofocus>
@@ -251,7 +250,7 @@ def _login_form(params: dict, error: str = "", status: int | None = None, header
   <input id="p" type="password" name="password" autocomplete="current-password">
   {err_html}
   <button type="submit">Authorize</button>
-  <p class="sub">A client is requesting access to {_RESOURCE_NAME}.</p>
+  <p class="sub">A client is requesting access to {html.escape(config.VAULT_OAUTH_RESOURCE_NAME)}.</p>
  </form>
 </body></html>"""
     return HTMLResponse(page, status_code=status, headers=headers)
@@ -261,7 +260,7 @@ def _misconfigured_page() -> HTMLResponse:
     return HTMLResponse(
         "<h1>Server not configured for login</h1>"
         "<p>This server requires <code>VAULT_OAUTH_PASSWORD</code> to be set before it can "
-        f"authorize access to {_RESOURCE_NAME}. Set it and restart.</p>",
+        f"authorize access to {html.escape(config.VAULT_OAUTH_RESOURCE_NAME)}. Set it and restart.</p>",
         status_code=503,
     )
 
@@ -271,7 +270,7 @@ async def oauth_metadata(request: Request) -> JSONResponse:
     base_url = config.advertised_base_url(str(request.base_url))
     return JSONResponse({
         "issuer": base_url,
-        "server_name": _RESOURCE_NAME,
+        "server_name": config.VAULT_OAUTH_RESOURCE_NAME,
         "authorization_endpoint": f"{base_url}/oauth/authorize",
         "token_endpoint": f"{base_url}/oauth/token",
         "registration_endpoint": f"{base_url}/oauth/register",
@@ -295,7 +294,7 @@ async def oauth_protected_resource(request: Request) -> JSONResponse:
     mismatch, which is why the "/"-only assumption went unnoticed."""
     return JSONResponse({
         "resource": canonical_resource(request),
-        "resource_name": _RESOURCE_NAME,
+        "resource_name": config.VAULT_OAUTH_RESOURCE_NAME,
         "authorization_servers": [config.advertised_base_url(str(request.base_url))],
         "bearer_methods_supported": ["header"],
     })
@@ -658,7 +657,7 @@ async def oauth_register(request: Request) -> JSONResponse:
 
     client_name = body.get("client_name")
     if not isinstance(client_name, str) or not client_name or not _storable(client_name):
-        client_name = _RESOURCE_NAME + " MCP Client"
+        client_name = config.VAULT_OAUTH_RESOURCE_NAME + " MCP Client"
     else:
         client_name = client_name[:CLIENT_NAME_MAX_LENGTH]
 

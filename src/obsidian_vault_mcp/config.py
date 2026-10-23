@@ -23,6 +23,8 @@ VAULT_DAILY_NOTES_TEMPLATE = os.environ.get("VAULT_DAILY_NOTES_TEMPLATE", "")
 # auth-exempt path, or it would serve the vault on an unauthenticated route.
 VAULT_MCP_PATH = os.environ.get("VAULT_MCP_PATH", "/")
 
+VAULT_OAUTH_RESOURCE_NAME = os.environ.get("VAULT_OAUTH_RESOURCE_NAME", "Obsidian Vault")
+
 # OAuth 2.0 client credentials (for Claude app integration)
 VAULT_OAUTH_CLIENT_ID = os.environ.get("VAULT_OAUTH_CLIENT_ID", "vault-mcp-client")
 VAULT_OAUTH_CLIENT_SECRET = os.environ.get("VAULT_OAUTH_CLIENT_SECRET", "")
